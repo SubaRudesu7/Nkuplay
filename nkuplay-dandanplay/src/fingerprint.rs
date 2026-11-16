@@ -23,8 +23,22 @@ pub struct Fingerprint {
 pub fn fingerprint(path: &Path) -> std::io::Result<Fingerprint> {
     let file = File::open(path)?;
     let file_size = file.metadata()?.len();
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    fingerprint_reader(&name, file, file_size)
+}
+
+/// 从一个已经打开的文件读取指纹：`name` 是用户看到的文件名（可带扩展名），
+/// `reader` 从文件开头读起，`file_size` 是整个文件的长度。只读前 16 MiB。
+pub fn fingerprint_reader(
+    name: &str,
+    reader: impl Read,
+    file_size: u64,
+) -> std::io::Result<Fingerprint> {
     let mut hash = Md5::new();
-    let mut head = file.take(HASHED_BYTES);
+    let mut head = reader.take(HASHED_BYTES);
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
         let read = head.read(&mut buffer)?;
@@ -38,7 +52,7 @@ pub fn fingerprint(path: &Path) -> std::io::Result<Fingerprint> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let file_name = path
+    let file_name = Path::new(name)
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -100,6 +114,14 @@ mod tests {
         assert_eq!(print.file_size, 16 * 1024 * 1024 + 1024);
         // 16 MiB 的 0x61 的 md5，用 Python 的 hashlib 算出。
         assert_eq!(print.file_hash, "f4820540fc0ac02750739896fe028d56");
+    }
+
+    #[test]
+    fn a_reader_is_fingerprinted_like_the_file_it_reads() {
+        let print = fingerprint_reader("Show - 02.mp4", &b"hello dandanplay"[..], 16).unwrap();
+        assert_eq!(print.file_name, "Show - 02");
+        assert_eq!(print.file_size, 16);
+        assert_eq!(print.file_hash, "a9759ca91fb7420de375cc159dab29a0");
     }
 
     #[test]

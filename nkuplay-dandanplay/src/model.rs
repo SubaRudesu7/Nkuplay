@@ -115,6 +115,37 @@ pub(crate) struct SearchEpisodesBody {
     pub animes: Vec<SearchedAnime>,
 }
 
+/// 新番列表里的一部作品（`GET /api/v2/bangumi/shin` 的 `BangumiIntro`）。
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BangumiIntro {
+    pub anime_id: i64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub anime_title: String,
+    /// 海报地址。
+    #[serde(default)]
+    pub image_url: Option<String>,
+    /// 每周哪天更新：0 是星期日，1 到 6 是星期一到星期六。
+    #[serde(default)]
+    pub air_day: i32,
+    /// 正在连载。
+    #[serde(default)]
+    pub is_on_air: bool,
+    /// 限制级内容。
+    #[serde(default)]
+    pub is_restricted: bool,
+    /// 综合评分，0 到 10。
+    #[serde(default)]
+    pub rating: f64,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BangumiListBody {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub bangumi_list: Vec<BangumiIntro>,
+}
+
 /// 调用失败时，每个应答都可能带有的内容。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -203,6 +234,35 @@ mod tests {
         .unwrap();
         assert_eq!(body.animes[0].anime_title, "");
         assert!(body.animes[0].episodes.is_empty());
+    }
+
+    #[test]
+    fn a_shin_bangumi_answer_is_read() {
+        let body: BangumiListBody = decode(
+            r#"{
+                "bangumiList": [
+                    {"animeId": 1, "bangumiId": "b1", "animeTitle": "某新番",
+                     "imageUrl": "https://img.example/1.jpg", "searchKeyword": "某新番",
+                     "isOnAir": true, "airDay": 4, "isFavorited": false,
+                     "isRestricted": false, "rating": 8.5},
+                    {"animeId": 2, "animeTitle": null, "imageUrl": null, "airDay": 0}
+                ],
+                "errorCode": 0, "success": true, "errorMessage": null
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(body.bangumi_list.len(), 2);
+        let first = &body.bangumi_list[0];
+        assert_eq!(first.anime_title, "某新番");
+        assert_eq!(
+            first.image_url.as_deref(),
+            Some("https://img.example/1.jpg")
+        );
+        assert_eq!(first.air_day, 4);
+        assert!(first.is_on_air);
+        assert_eq!(first.rating, 8.5);
+        assert_eq!(body.bangumi_list[1].anime_title, "");
+        assert_eq!(body.bangumi_list[1].image_url, None);
     }
 
     #[test]

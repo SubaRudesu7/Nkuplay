@@ -3,7 +3,10 @@
 use crate::auth::Credentials;
 use crate::comment::{Comment, CommentsBody};
 use crate::error::Error;
-use crate::model::{MatchRequest, MatchResult, SearchEpisodesBody, SearchedAnime, decode};
+use crate::model::{
+    BangumiIntro, BangumiListBody, MatchRequest, MatchResult, SearchEpisodesBody, SearchedAnime,
+    decode,
+};
 use serde::de::DeserializeOwned;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -106,6 +109,16 @@ impl Client {
         ];
         let body: CommentsBody = self.get(&path, &query)?;
         Ok(body.into_comments())
+    }
+
+    /// 本季新番。`filter_adult` 为真时服务器去掉限制级作品。
+    pub fn shin_bangumi(&self, filter_adult: bool) -> Result<Vec<BangumiIntro>, Error> {
+        let query = [(
+            "filterAdultContent",
+            if filter_adult { "true" } else { "false" },
+        )];
+        let body: BangumiListBody = self.get("/api/v2/bangumi/shin", &query)?;
+        Ok(body.bangumi_list)
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T, Error> {

@@ -1,0 +1,12 @@
+[package]
+name = "nkuplay-core"
+description = "Nkuplay: the engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bern.workspace = true
+nkuplay-protocol.workspace = true
+nkuplay-mpv.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "nkuplay-ui"
+description = "Nkuplay: the interface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bern.workspace = true
+nkuplay-protocol.workspace = true

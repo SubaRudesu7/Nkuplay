@@ -1,0 +1,72 @@
+# Nkuplay，一个 Bern 应用。`bern run` 构建并在本机启动它；
+# `bern build --target <名称>` 构建下面的某一个目标。
+
+[app]
+id = "nkuplay"
+# 发布前改成你自己拥有的反向域名。
+bundle_id = "com.example.nkuplay"
+version = "0.1.0"
+name = { "en" = "Nkuplay", "zh-Hans" = "Nkuplay" }
+# 一张 1024 像素的正方形 PNG；不设置时应用使用 Bern 的图标。
+# icon = "icon.png"
+# 也可以写成表，给各平台各自的图标：正方形 PNG，或平台自己的格式；`default` 覆盖其余平台：
+# icon = { default = "icon.png", macos = "icons/App.icns", windows = "icons/app.ico", ios = "icons/AppIcon.appiconset", android = "icons/android/res", linux = "icons/hicolor", browser = "icons/web" }
+# macOS 和 iOS 还接受 Icon Composer 文档（`icons/App.icon`），
+# 从 macOS 26 和 iOS 26 起以 Liquid Glass 效果显示。
+# 显示在安装器和包管理器里。
+# publisher = "Your Name"
+
+[languages]
+supported = ["en", "zh-Hans"]
+default = "en"
+
+[protocol]
+package = "nkuplay-protocol"
+source = "nkuplay-protocol/src/lib.rs"
+
+[engine]
+package = "nkuplay-core"
+type = "nkuplay_core::NkuplayEngine"
+
+[ui]
+package = "nkuplay-ui"
+sources = ["nkuplay-ui/src/lib.rs"]
+root = "app"
+
+# `channels = ["ipc"]` 让生成的命令行和 MCP 服务器能操控正在运行的应用。
+# 去掉它，发布出去的应用就不监听任何通道。
+
+[targets.macos]
+platform = "macos"
+channels = ["ipc"]
+
+# iOS，为模拟器构建；`bern run --target ios` 在正在运行的模拟器里启动它。
+[targets.ios]
+platform = "ios"
+channels = ["ipc"]
+# iOS 16 及以上，打成一个 .ipa，应用启动时自行选择前端。
+# 只写 "swiftui" 则只支持 iOS 17 及以上；也可以两个都保留，
+# 再用 packages 要求各出一个 .ipa。
+# frontends = ["swiftui"]
+# packages = "separate"
+
+[targets.windows]
+platform = "windows"
+channels = ["ipc"]
+# 系统有 Windows App Runtime 2 时用 WinUI 3，否则用系统自带的 XAML。
+# 只写其中一个前端，就只构建那一个。
+# frontends = ["winui3", "xaml-islands"]
+
+[targets.linux]
+platform = "linux"
+channels = ["ipc"]
+
+# Android 手机；`bern run --target android` 把应用装到已连接的设备上并启动。
+[targets.android]
+platform = "android"
+channels = ["ipc"]
+
+[targets.web_app]
+ui = "web"
+platform = "browser"
+web_mode = "app"

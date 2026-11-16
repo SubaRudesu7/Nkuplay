@@ -1,0 +1,5 @@
+/target
+.DS_Store
+
+# libmpv 开发包是下载来的，不入库（DLL 约 100 MB）。
+/third_party/libmpv/

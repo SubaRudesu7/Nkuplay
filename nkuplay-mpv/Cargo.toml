@@ -1,0 +1,20 @@
+[package]
+name = "nkuplay-mpv"
+description = "Nkuplay: libmpv as the media kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bern.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+libloading = "0.8"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }

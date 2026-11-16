@@ -1,0 +1,15 @@
+[package]
+name = "nkuplay-dandanplay"
+description = "Nkuplay: client of the dandanplay open danmaku API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+base64 = "0.22"
+md-5 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ureq = "3"

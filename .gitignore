@@ -1,11 +1,7 @@
 /target
 .DS_Store
-
-# libmpv 开发包是下载来的，不入库（DLL 约 100 MB）。
 /third_party/libmpv/
-
-# 编译好的应用，复制到这里方便直接打开；由 bern build 生成，不入库。
 /Nkuplay/
-
-# 设计稿：效果图里有番剧海报、TMDB 剧照和弹弹play 的数据，版权不归本项目，不入库。
 /design/
+/HANDOFF.md
+/README.md

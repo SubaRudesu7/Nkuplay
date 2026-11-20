@@ -80,6 +80,11 @@ pub mod nkuplay {
         /// 作品的海报（弹弹play 认出后才有）；`has_poster` 为假时没有意义。
         pub poster: MediaSource,
         pub has_poster: bool,
+        /// 上次离开时的画面；`has_shot` 为假时没有意义。
+        pub shot: MediaSource,
+        pub has_shot: bool,
+        /// 看了百分之几。
+        pub percent: i64,
     }
 
     /// 本季新番里的一部作品。
@@ -92,6 +97,9 @@ pub mod nkuplay {
         /// 海报地址；`has_poster` 为假时没有意义。
         pub poster: MediaSource,
         pub has_poster: bool,
+        /// 进详情页时海报飞过去用的标识，和 `detail_hero` 对上。
+        #[content]
+        pub hero: String,
     }
 
     /// 媒体库里的一个文件夹。
@@ -104,6 +112,96 @@ pub mod nkuplay {
         pub videos: i64,
         /// 还在扫描这个文件夹。
         pub scanning: bool,
+    }
+
+    /// 媒体库海报墙上的一部番：同一作品在各个文件夹里的剧集合在一起。
+    #[value]
+    pub struct Series {
+        pub id: i64,
+        /// 弹弹play 认出的作品名；没认出时是从文件名里认出的。
+        #[content]
+        pub title: String,
+        /// 海报；`has_poster` 为假时没有意义。
+        pub poster: MediaSource,
+        pub has_poster: bool,
+        /// 有几集。
+        pub episodes: i64,
+        /// 进详情页时海报飞过去用的标识，和 `detail_hero` 对上。
+        #[content]
+        pub hero: String,
+    }
+
+    /// 详情页剧集列表里的一集：弹弹play 的一集（对上了本地文件或没对上），或本地多出来的文件。
+    #[value]
+    pub struct DetailEpisode {
+        pub id: i64,
+        /// 特别篇和 OP/ED 的短编号（`S1`、`C1`）；正片和本地文件为空。
+        #[content]
+        pub code: String,
+        /// 第几集；特别篇和认不出集数的文件为 0。
+        pub number: i64,
+        /// 剧集标题（不含“第N话”），本地多出来的文件是文件名。
+        #[content]
+        pub title: String,
+        /// 本地有这一集，点了能播放。
+        pub local: bool,
+        /// 本地文件；`local` 为假时没有意义。
+        pub source: MediaSource,
+        /// 看了百分之几；没看过为 0。
+        pub percent: i64,
+        /// 看完了（播到 90% 以上）。
+        pub finished: bool,
+        /// “继续”指向这一集。
+        pub current: bool,
+    }
+
+    /// 作品的一个标签。
+    #[value]
+    pub struct DetailTag {
+        pub id: i64,
+        #[content]
+        pub name: String,
+    }
+
+    /// 一条短评。
+    #[value]
+    pub struct DetailComment {
+        pub id: i64,
+        #[content]
+        pub user: String,
+        /// 1 到 10；没打分时为 0。
+        pub score: i64,
+        #[content]
+        pub text: String,
+    }
+
+    /// 一个网站的评分，例如“Bangumi评分”和“6.4”。
+    #[value]
+    pub struct DetailScore {
+        pub id: i64,
+        #[content]
+        pub site: String,
+        #[content]
+        pub score: String,
+    }
+
+    /// 制作信息的一条，例如“导演”和“小出卓史”。
+    #[value]
+    pub struct DetailFact {
+        pub id: i64,
+        #[content]
+        pub key: String,
+        #[content]
+        pub value: String,
+    }
+
+    /// 详情页的背景图。换图时编号变，界面借此淡入淡出。
+    #[value]
+    pub struct Backdrop {
+        pub id: i64,
+        pub source: MediaSource,
+        /// 是剧照（清晰显示）；否则是海报（虚化显示）。
+        pub still: bool,
     }
 
     #[state]
@@ -127,6 +225,18 @@ pub mod nkuplay {
         /// 弹幕获取失败的原因；没有失败时为空。
         #[content]
         pub danmaku_error: String,
+        /// 弹幕显示在画面上；换视频时保持不变。
+        pub danmaku_visible: bool,
+
+        /// 每打开一次视频加一。界面看到它变化，就让播放器载入 `source`。
+        pub opened: i64,
+        /// 每请求一次跳转加一；界面看到它变化，就让播放器跳到 `seek_ms`。
+        /// 界面不能做算术，进度条给的比例由引擎换算成毫秒。
+        pub seek_serial: i64,
+        /// 要跳到的位置，毫秒。
+        pub seek_ms: i64,
+        /// 想要的音量，0 到 1。界面看到它变化就交给播放器；换视频时保持不变。
+        pub volume: f64,
 
         /// 继续观看：最近打开过的视频，最近的在前。
         pub recents: Vec<Recent>,
@@ -151,16 +261,124 @@ pub mod nkuplay {
         pub folders: Vec<Folder>,
         /// `folders` 的个数。
         pub folder_count: i64,
+
+        /// 媒体库海报墙，按作品名排好。
+        pub series: Vec<Series>,
+        /// `series` 的个数。
+        pub series_count: i64,
+        /// 还有文件夹在扫描或识别。
+        pub library_scanning: bool,
+
+        /// 番剧详情页打开着：窗口不显示导航，只显示这一页。
+        pub detail_open: bool,
+        /// 作品名。
+        #[content]
+        pub detail_title: String,
+        /// 其他语言的标题，用 ` · ` 连起来；没有时为空。
+        #[content]
+        pub detail_other_titles: String,
+        pub detail_poster: MediaSource,
+        pub detail_has_poster: bool,
+        /// 从哪张海报点进来的（`Series::hero` 或 `ShinAnime::hero`）；海报从那里飞到横幅上。
+        #[content]
+        pub detail_hero: String,
+        /// 背景图：没有或一张。
+        pub detail_backdrop: Vec<Backdrop>,
+        /// 有不止一张剧照，界面定时换下一张。
+        pub detail_rotates: bool,
+        /// 弹弹play 的资料已经有了（下面的评分、类别、简介等有意义）。
+        pub detail_known: bool,
+        /// 正在向弹弹play 取资料。
+        pub detail_loading: bool,
+        /// 取资料失败的原因；没有失败时为空。
+        #[content]
+        pub detail_error: String,
+        /// 综合评分，0 到 10；没有评分时为 0。
+        pub detail_rating: f64,
+        /// 评分写成一位小数。
+        #[content]
+        pub detail_rating_text: String,
+        /// 作品类别，例如“TV动画”。
+        #[content]
+        pub detail_kind: String,
+        /// 开播的年份（文字，免得显示成 2,026）和月份；`detail_has_premiere` 为假时没有意义。
+        #[content]
+        pub detail_year: String,
+        pub detail_month: i64,
+        pub detail_has_premiere: bool,
+        /// 还在连载。
+        pub detail_on_air: bool,
+        pub detail_tags: Vec<DetailTag>,
+        #[content]
+        pub detail_summary: String,
+
+        /// 剧集，按 `detail_descending` 排好。
+        pub detail_episodes: Vec<DetailEpisode>,
+        /// 弹弹play 的正片集数、特别篇和 OP/ED 个数、本地有的集数。
+        pub detail_main_count: i64,
+        pub detail_special_count: i64,
+        pub detail_local_count: i64,
+        /// 上次看的那一集：`detail_has_last` 为真时，`detail_last_code` 非空就是它（`S1`），
+        /// 否则是第 `detail_last_number` 集（0 表示认不出集数的文件）。
+        pub detail_has_last: bool,
+        #[content]
+        pub detail_last_code: String,
+        pub detail_last_number: i64,
+        /// 剧集倒着排。
+        pub detail_descending: bool,
+        /// 本地有可以播放的一集：“继续”按钮可用，播放 `detail_resume`。
+        pub detail_can_resume: bool,
+        pub detail_resume: MediaSource,
+        /// 这部番看过（按钮写“继续”，否则写“播放”）。
+        pub detail_started: bool,
+
+        /// 短评（第一页）、一共多少条、来自哪个网站。
+        pub detail_comments: Vec<DetailComment>,
+        /// 这一页的评论比显示的多，可以展开；展开着时为假。
+        pub detail_comments_more: bool,
+        /// 评论展开着（显示这一页全部）。
+        pub detail_comments_expanded: bool,
+        pub detail_comment_count: i64,
+        #[content]
+        pub detail_comment_source: String,
+        pub detail_scores: Vec<DetailScore>,
+        pub detail_facts: Vec<DetailFact>,
     }
 
     #[commands]
     pub trait Commands {
-        /// 打开一个视频文件并播放，同时识别它并获取弹幕。
+        /// 打开一个视频文件并播放，同时识别它并获取弹幕。上次看到一半的，从那里接着播。
         fn open_file(&mut self, file: MediaSource) -> Result<(), CommandError>;
 
         /// 停止播放，回到首页。
         #[idempotent]
         fn close(&mut self) -> Result<(), CommandError>;
+
+        /// 跳到总时长的 `fraction` 处（0 到 1）。`duration_ms` 是播放器报的总时长，
+        /// 不知道时为空，此时不跳。
+        fn seek(&mut self, fraction: f64, duration_ms: Option<i64>) -> Result<(), CommandError>;
+
+        /// 把音量设为 `volume`（0 到 1）。
+        #[idempotent]
+        fn set_volume(&mut self, volume: f64) -> Result<(), CommandError>;
+
+        /// 音量加 `step`（可以是负数），结果限制在 0 到 1。
+        fn nudge_volume(&mut self, step: f64) -> Result<(), CommandError>;
+
+        /// 从 `position_ms`（播放器报的当前位置）往后跳 `seconds` 秒，负数往前跳，
+        /// 结果限制在 0 到总时长。连按时在上一次要跳到的位置上接着加减。
+        fn skip(
+            &mut self,
+            seconds: f64,
+            position_ms: i64,
+            duration_ms: Option<i64>,
+        ) -> Result<(), CommandError>;
+
+        /// 显示或隐藏画面上的弹幕。
+        fn toggle_danmaku(&mut self) -> Result<(), CommandError>;
+
+        /// 重新整理继续观看：去掉文件已经不在了的视频。
+        fn refresh_recents(&mut self) -> Result<(), CommandError>;
 
         /// 准备本季新番列表：有缓存就读缓存，从没取过才向弹弹play 取一次。
         /// 已经准备过则什么也不做。
@@ -176,6 +394,44 @@ pub mod nkuplay {
 
         /// 把一个文件夹加入媒体库，并在后台数出里面的视频。
         fn add_folder(&mut self, folder: MediaSource) -> Result<(), CommandError>;
+
+        /// 重新扫描所有文件夹：归出番剧，对还没认出的每部请弹弹play 认一集。
+        fn refresh_library(&mut self) -> Result<(), CommandError>;
+
+        /// 打开海报墙上编号为 `id` 的番的详情页。
+        #[idempotent]
+        fn open_series(&mut self, id: i64) -> Result<(), CommandError>;
+
+        /// 打开弹弹play 作品 `anime_id`（例如本季新番里的一部）的详情页。
+        #[idempotent]
+        fn open_anime(&mut self, anime_id: i64) -> Result<(), CommandError>;
+
+        /// 关掉详情页，回到原来那一页。
+        #[idempotent]
+        fn close_details(&mut self) -> Result<(), CommandError>;
+
+        /// 不管缓存，向弹弹play 重新取详情页的资料。
+        fn refresh_details(&mut self) -> Result<(), CommandError>;
+
+        /// 剧集正着排和倒着排之间切换。
+        fn toggle_episode_order(&mut self) -> Result<(), CommandError>;
+
+        /// 忘掉详情页这部番每一集看到哪里。
+        fn clear_progress(&mut self) -> Result<(), CommandError>;
+
+        /// 评论在只显示几条和显示这一页全部之间切换。
+        fn toggle_comments(&mut self) -> Result<(), CommandError>;
+
+        /// 背景换下一张剧照。
+        fn next_backdrop(&mut self) -> Result<(), CommandError>;
+
+        /// 记下正在看的视频看到了哪里：`position_ms` 和 `duration_ms` 是播放器报的位置和总时长。
+        /// 刚打开视频的几秒里不记（播放器报的可能还是上一个视频的）。
+        fn record_progress(
+            &mut self,
+            position_ms: i64,
+            duration_ms: Option<i64>,
+        ) -> Result<(), CommandError>;
 
         /// 把编号为 `id` 的文件夹移出媒体库；不删除任何文件。
         #[idempotent]

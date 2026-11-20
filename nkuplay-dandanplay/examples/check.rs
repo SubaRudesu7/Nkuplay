@@ -26,7 +26,12 @@ fn main() -> ExitCode {
     };
     let client = Client::new(credentials);
     let path = Path::new(&argument);
-    let outcome = if path.is_file() {
+    let outcome = if let Some(id) = argument
+        .strip_prefix("anime:")
+        .and_then(|id| id.parse().ok())
+    {
+        details(&client, id)
+    } else if path.is_file() {
         identify(&client, path)
     } else {
         search(&client, &argument)
@@ -38,6 +43,30 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn details(client: &Client, anime_id: i64) -> Result<(), nkuplay_dandanplay::Error> {
+    let Some(details) = client.bangumi(anime_id)? else {
+        println!("弹弹play 没有作品 {anime_id}。");
+        return Ok(());
+    };
+    println!(
+        "{}（{}，评分 {}）：{} 集，{} 个标签，{} 条制作信息，{} 个站的评分",
+        details.anime_title,
+        details.type_description,
+        details.rating,
+        details.episodes.len(),
+        details.tags.len(),
+        details.metadata.len(),
+        details.rating_details.len()
+    );
+    let comments = client.bangumi_comments(anime_id, 0)?;
+    println!(
+        "短评：共 {} 条，这一页 {} 条",
+        comments.count,
+        comments.comments.len()
+    );
+    Ok(())
 }
 
 fn identify(client: &Client, path: &Path) -> Result<(), nkuplay_dandanplay::Error> {

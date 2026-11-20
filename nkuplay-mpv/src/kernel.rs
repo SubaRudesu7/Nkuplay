@@ -7,6 +7,9 @@
 //!
 //! 只有一个 mpv 实例，所以同一时间只有一个播放器在播：最后加载的那个。
 //! 它的画面显示在最后挂接的视图里。
+//!
+//! 弹幕：每次帧时钟来一帧，按平滑后的播放时间算出屏上的弹幕，用 `osd-overlay` 交给 mpv。
+//! 弹幕变了就把当前这一帧视频重画一遍，所以 24 帧的片子上弹幕也按屏幕刷新率滚动。
 
 use crate::d3d::{self, Surface};
 use crate::sys::{self, Mpv};
@@ -16,10 +19,12 @@ use bern::media::kernel::{
     ExecOp, ExecRequest, FrameTiming, KernelHub, MediaCapabilities, MediaExecutor, MediaKernel,
     Observation, Phase, SurfaceHandle, SurfaceKind, SurfaceSize, VideoSurface,
 };
+use nkuplay_danmaku::{CANVAS_HEIGHT, Clock, Comment, Config, Layout, Measure, Track};
 use std::ffi::{CStr, CString, c_int, c_void};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 
@@ -27,6 +32,8 @@ use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 const REPORT_EVERY: Duration = Duration::from_millis(100);
 /// 视图等待内核放开它的表面的最长时间。
 const DETACH_TIMEOUT: Duration = Duration::from_secs(2);
+/// 应用退出时等 mpv 关掉的最长时间。
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 enum Message {
     Hub(Option<Arc<dyn KernelHub>>),
@@ -45,6 +52,67 @@ enum Message {
         done: Sender<()>,
     },
     Frame,
+    /// 一集的弹幕和时间偏移；为空时去掉弹幕。
+    Danmaku(Option<(Vec<Comment>, f64)>),
+    /// 显示或隐藏弹幕。
+    DanmakuVisible(bool),
+    /// 下一次打开这个地址时从这个位置（毫秒）开始播；为空时不指定。
+    StartAt(Option<(String, i64)>),
+    /// 把正在显示的这一帧画面（不含字幕和弹幕）存成图片，存好了（或没能存）回话。
+    Snapshot(PathBuf, Sender<bool>),
+    /// 应用要退出了：关掉 mpv，结束内核线程，然后回话。
+    Shutdown(Sender<()>),
+}
+
+/// 画弹幕用的 OSD 叠加层编号。
+const DANMAKU_OVERLAY: &CStr = c"1";
+
+/// 装上的内核，供引擎交弹幕用。
+static KERNEL: OnceLock<Arc<MpvKernel>> = OnceLock::new();
+
+/// 记下装上的内核。
+pub fn remember(kernel: &Arc<MpvKernel>) {
+    let _ = KERNEL.set(Arc::clone(kernel));
+}
+
+/// 把弹幕交给内核线程；没有内核时什么也不做。
+pub fn set_danmaku(danmaku: Option<(Vec<Comment>, f64)>) {
+    if let Some(kernel) = KERNEL.get() {
+        kernel.send(Message::Danmaku(danmaku));
+    }
+}
+
+/// 显示或隐藏弹幕；没有内核时什么也不做。
+pub fn show_danmaku(visible: bool) {
+    if let Some(kernel) = KERNEL.get() {
+        kernel.send(Message::DanmakuVisible(visible));
+    }
+}
+
+/// 下一次打开 `url` 时从 `position_ms` 开始播；没有内核时什么也不做。
+pub fn start_at(start: Option<(String, i64)>) {
+    if let Some(kernel) = KERNEL.get() {
+        kernel.send(Message::StartAt(start));
+    }
+}
+
+/// 请内核把正在显示的画面存到 `path`（JPEG）。请求马上排进内核的队列（排在之后的打开前面），
+/// 存好了（或没能存）从交回的通道回话。没有内核时为空。
+pub fn snapshot(path: PathBuf) -> Option<Receiver<bool>> {
+    let kernel = KERNEL.get()?;
+    let (done, finished) = channel();
+    kernel.send(Message::Snapshot(path, done));
+    Some(finished)
+}
+
+/// 正在显示的一集弹幕。
+struct Danmaku {
+    track: Arc<Track>,
+    /// 按当前画面宽高比排好的；画面宽高比变了才重排。
+    layout: Option<Layout>,
+    clock: Clock,
+    /// 上次交给 mpv 的文本，没变就不再交。
+    shown: String,
 }
 
 pub struct MpvKernel {
@@ -68,7 +136,12 @@ impl MpvKernel {
             .spawn(move || match Worker::new(mpv, pending) {
                 Ok(mut worker) => {
                     let _ = ready.send(Ok(worker.version()));
-                    worker.run(inbox);
+                    let finished = worker.run(inbox);
+                    // 先释放 mpv（`Drop` 里 `mpv_terminate_destroy`，等它自己的线程都结束），再回话。
+                    drop(worker);
+                    if let Some(finished) = finished {
+                        let _ = finished.send(());
+                    }
                 }
                 Err(reason) => {
                     let _ = ready.send(Err(reason));
@@ -115,8 +188,14 @@ impl MediaKernel for MpvKernel {
         self.send(Message::Hub(Some(hub)));
     }
 
+    /// 只在应用退出时调用（`bern_app_stop`）。除了停下播放，还要把 mpv 整个关掉并等它关完：
+    /// 应用的播放器（`#[bern::players]`）在窗口关闭后仍留着，mpv 还开着文件、音频和解码线程；
+    /// 不关就让进程直接结束的话，进程退出时会卡住，窗口没了、进程却一直留在后台。
     fn detached(&self) {
         self.send(Message::Hub(None));
+        let (finished, done) = channel();
+        self.send(Message::Shutdown(finished));
+        let _ = done.recv_timeout(SHUTDOWN_TIMEOUT);
     }
 
     fn attach_surface(&self, view: &str, _player: &str, surface: VideoSurface) {
@@ -179,8 +258,14 @@ struct Worker {
     /// 上次上报的内容，用来只上报变化。
     reported: Option<Observation>,
     last_report: Instant,
-    /// 即使 mpv 没有新画面也要画下一帧：表面是新的，或者尺寸变了。
+    /// 即使 mpv 没有新画面也要画下一帧：表面是新的，或者尺寸变了，或者弹幕动了。
     redraw: bool,
+    /// 正在显示视频的表面的像素尺寸。
+    canvas: (u32, u32),
+    danmaku: Option<Danmaku>,
+    danmaku_visible: bool,
+    /// 下一次打开这个地址时从哪里（毫秒）开始播。
+    start_at: Option<(String, i64)>,
 }
 
 impl Worker {
@@ -213,6 +298,9 @@ impl Worker {
         option(c"input-vo-keyboard", c"no");
         // 文件播完后停在最后一帧；没有文件时也保持运行。
         option(c"keep-open", c"yes");
+        // 继续播放卡片上的画面：存成 JPEG，小一些。
+        option(c"screenshot-format", c"jpg");
+        option(c"screenshot-jpeg-quality", c"85");
         option(c"idle", c"yes");
         // 一帧何时显示由应用的帧时钟决定。
         option(c"video-timing-offset", c"0");
@@ -276,15 +364,26 @@ impl Worker {
             reported: None,
             last_report: Instant::now(),
             redraw: false,
+            canvas: (0, 0),
+            danmaku: None,
+            danmaku_visible: true,
+            start_at: None,
         })
     }
 
-    fn run(&mut self, inbox: Receiver<Message>) {
+    /// 处理消息直到应用退出；退出时返回要回话的那一头。
+    fn run(&mut self, inbox: Receiver<Message>) -> Option<Sender<()>> {
         loop {
             match inbox.recv_timeout(REPORT_EVERY) {
+                Ok(Message::Shutdown(finished)) => {
+                    self.danmaku = None;
+                    self.shown = None;
+                    let _ = self.command(&[c"stop"]);
+                    return Some(finished);
+                }
                 Ok(message) => self.handle(message),
                 Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Disconnected) => return None,
             }
             self.drain_events();
             if self.last_report.elapsed() >= REPORT_EVERY {
@@ -319,6 +418,7 @@ impl Worker {
                 match Surface::attach(&self.device, panel, size.width, size.height) {
                     Ok(surface) => {
                         self.shown = Some(Shown { view, surface });
+                        self.canvas = (size.width, size.height);
                         self.redraw = true;
                     }
                     Err(reason) => eprintln!("nkuplay-mpv: {reason}"),
@@ -328,6 +428,7 @@ impl Worker {
                 if let Some(shown) = &mut self.shown
                     && shown.view == view
                 {
+                    self.canvas = (size.width, size.height);
                     match shown.surface.resize(size.width, size.height) {
                         Ok(changed) => self.redraw |= changed,
                         Err(reason) => eprintln!("nkuplay-mpv: {reason}"),
@@ -342,9 +443,120 @@ impl Worker {
             }
             Message::Frame => {
                 self.frame_pending.store(false, Ordering::Release);
+                self.update_danmaku();
                 self.draw();
             }
+            Message::Danmaku(danmaku) => {
+                self.clear_danmaku_overlay();
+                self.danmaku = danmaku.map(|(comments, shift)| {
+                    let track = Track::new(&comments, shift, Config::default(), &Measure::system());
+                    Danmaku {
+                        track: Arc::new(track),
+                        layout: None,
+                        clock: Clock::new(),
+                        shown: String::new(),
+                    }
+                });
+            }
+            Message::DanmakuVisible(visible) => {
+                self.danmaku_visible = visible;
+                if !visible {
+                    self.clear_danmaku_overlay();
+                }
+            }
+            Message::StartAt(start) => self.start_at = start,
+            Message::Snapshot(path, done) => {
+                let _ = done.send(self.snapshot(&path));
+            }
+            // `run` 自己处理，到不了这里。
+            Message::Shutdown(_) => {}
         }
+    }
+
+    /// 按现在的播放时间更新屏上的弹幕；变了就让这一帧重画。
+    fn update_danmaku(&mut self) {
+        let showing = self.danmaku_visible && self.loaded && self.shown.is_some();
+        let (width, height) = self.canvas;
+        if self.danmaku.is_none() || !showing || width == 0 || height == 0 {
+            self.clear_danmaku_overlay();
+            return;
+        }
+        let Some(position) = self.double(c"time-pos") else {
+            return;
+        };
+        let paused = self.flag(c"pause").unwrap_or(false)
+            || self.flag(c"paused-for-cache").unwrap_or(false)
+            || self.flag(c"eof-reached").unwrap_or(false);
+        let speed = self.double(c"speed").unwrap_or(1.0);
+        let canvas_width = CANVAS_HEIGHT * f64::from(width) / f64::from(height);
+        let Some(danmaku) = self.danmaku.as_mut() else {
+            return;
+        };
+        if danmaku
+            .layout
+            .as_ref()
+            .is_none_or(|layout| (layout.width() - canvas_width).abs() > 0.5)
+        {
+            danmaku.layout = Some(Layout::new(Arc::clone(&danmaku.track), canvas_width));
+        }
+        let time = danmaku.clock.tick(position, !paused, speed, Instant::now());
+        let events = danmaku
+            .layout
+            .as_ref()
+            .map(|layout| layout.events(time))
+            .unwrap_or_default();
+        if events == danmaku.shown {
+            return;
+        }
+        let result = if events.is_empty() {
+            self.command(&[c"osd-overlay", DANMAKU_OVERLAY, c"none", c""])
+        } else {
+            match CString::new(events.as_str()) {
+                Ok(data) => {
+                    let res_x = CString::new(format!("{}", canvas_width.round() as i64))
+                        .expect("a number has no NUL");
+                    let res_y = CString::new(format!("{}", CANVAS_HEIGHT as i64))
+                        .expect("a number has no NUL");
+                    self.command(&[
+                        c"osd-overlay",
+                        DANMAKU_OVERLAY,
+                        c"ass-events",
+                        &data,
+                        &res_x,
+                        &res_y,
+                        c"0",
+                        c"no",
+                        c"no",
+                    ])
+                }
+                // 弹幕文字里有 NUL：这一帧不画。
+                Err(_) => return,
+            }
+        };
+        match result {
+            Ok(()) => {
+                if let Some(danmaku) = self.danmaku.as_mut() {
+                    danmaku.shown = events;
+                }
+                self.redraw = true;
+            }
+            Err(error) => eprintln!("nkuplay-mpv: {}", error.message),
+        }
+    }
+
+    /// 从画面上去掉弹幕（弹幕本身留着）。
+    fn clear_danmaku_overlay(&mut self) {
+        let Some(danmaku) = self.danmaku.as_mut() else {
+            return;
+        };
+        // 下次再显示时从 mpv 的位置重新开始算。
+        danmaku.clock.reset();
+        if danmaku.shown.is_empty() {
+            return;
+        }
+        danmaku.shown.clear();
+        let _ = self.command(&[c"osd-overlay", DANMAKU_OVERLAY, c"none", c""]);
+        self.redraw = true;
     }
 
     /// 有新画面或表面需要重画时，把 mpv 当前的画面画进正在显示的视图。
@@ -421,7 +633,18 @@ impl Worker {
                 self.error = None;
                 self.reported = None;
                 self.set_flag(c"pause", false)?;
-                self.command(&[c"loadfile", &location])
+                // 断点续播：引擎在让界面打开之前说过从哪里开始。只用一次，而且只对那个地址。
+                let start = self.start_at.take().filter(|(wanted, _)| *wanted == url);
+                match start {
+                    Some((_, position_ms)) => {
+                        let options =
+                            CString::new(format!("start={:.3}", position_ms as f64 / 1000.0))
+                                .expect("a number has no NUL");
+                        // `loadfile <地址> <方式> <位置> <选项>`；位置 -1 是 mpv 0.38 起要求的占位。
+                        self.command(&[c"loadfile", &location, c"replace", c"-1", &options])
+                    }
+                    None => self.command(&[c"loadfile", &location]),
+                }
             }
             ExecOp::Unload | ExecOp::Release => {
                 self.loading = false;
@@ -447,6 +670,22 @@ impl Worker {
             }
             ExecOp::SetMuted { muted } => self.set_flag(c"mute", muted),
         }
+    }
+
+    /// 把这一帧画面存到 `path`；`video` 表示只要视频画面，不要字幕和 OSD（弹幕画在 OSD 上）。
+    fn snapshot(&self, path: &std::path::Path) -> bool {
+        if !self.loaded {
+            return false;
+        }
+        let Some(location) = path.to_str().and_then(|path| CString::new(path).ok()) else {
+            return false;
+        };
+        if let Some(folder) = path.parent() {
+            let _ = std::fs::create_dir_all(folder);
+        }
+        self.command(&[c"screenshot-to-file", &location, c"video"])
+            .is_ok()
+            && path.is_file()
     }
 
     /// 取走 mpv 自上次以来要说的所有内容，不等待。

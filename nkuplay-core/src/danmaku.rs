@@ -249,6 +249,25 @@ impl Loader {
     }
 
     /// 为指纹是 `print` 的文件取弹幕。
+    /// 只认出 `source` 是哪部作品，不取弹幕：媒体库的海报墙用。认不出时为空。
+    /// 和开始播放时共用同一份识别缓存，认过的文件不再发请求。会阻塞。
+    pub fn identify(
+        &self,
+        source: &MediaSource,
+    ) -> Result<Option<crate::library::Identity>, String> {
+        let file = source.open().map_err(|error| error.message)?;
+        let size = file.len();
+        let name = source.file_name().unwrap_or_default();
+        let print = fingerprint_reader(&name, file, size).map_err(|error| error.to_string())?;
+        Ok(self
+            .episode(print)?
+            .map(|episode| crate::library::Identity {
+                anime_id: episode.anime_id,
+                title: episode.anime_title,
+                poster: episode.poster,
+            }))
+    }
+
     pub fn load_fingerprint(&self, print: Fingerprint, airing: &HashSet<i64>) -> Outcome {
         let episode = match self.episode(print) {
             Ok(Some(episode)) => episode,

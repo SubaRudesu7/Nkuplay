@@ -1,5 +1,5 @@
 //! 弹弹play 开放弹幕网络（`api.dandanplay.net`，API v2）的客户端：
-//! 识别视频文件、按标题搜索剧集、获取某一集的弹幕，以及本季新番列表。
+//! 识别视频文件、按标题搜索剧集、获取某一集的弹幕、本季新番列表，以及作品的详情和短评。
 //!
 //! 弹弹play 文档描述的常规流程：
 //!
@@ -24,5 +24,7 @@ pub use comment::{Comment, CommentMode};
 pub use error::Error;
 pub use fingerprint::{Fingerprint, fingerprint, fingerprint_reader};
 pub use model::{
-    BangumiIntro, EpisodeMatch, EpisodeSummary, MatchMode, MatchRequest, MatchResult, SearchedAnime,
+    BangumiComment, BangumiComments, BangumiDetails, BangumiEpisode, BangumiIntro, BangumiTag,
+    BangumiTitle, EpisodeMatch, EpisodeSummary, MatchMode, MatchRequest, MatchResult,
+    OnlineDatabase, SearchedAnime,
 };

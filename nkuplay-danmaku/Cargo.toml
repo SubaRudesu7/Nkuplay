@@ -1,0 +1,11 @@
+[package]
+name = "nkuplay-danmaku"
+description = "Nkuplay: danmaku layout and rendering text"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# 读系统字体里每个字的宽度，让排版和 libass 画出来的一致。
+ttf-parser = "0.25"

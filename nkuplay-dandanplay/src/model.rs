@@ -146,6 +146,178 @@ pub(crate) struct BangumiListBody {
     pub bangumi_list: Vec<BangumiIntro>,
 }
 
+/// 作品详情里的一集（`BangumiEpisode`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BangumiEpisode {
+    pub episode_id: i64,
+    /// 例如 `第1话 人鱼公主菈菈`、`S1 ララと…`。
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub episode_title: String,
+    /// 正片是数字（`1`），特别篇是 `S1`，OP/ED 是 `C1`。
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub episode_number: String,
+    /// 首播时间，例如 `2026-07-06T00:00:00`。
+    #[serde(default)]
+    pub air_date: Option<String>,
+}
+
+/// 作品的另一个标题（`BangumiTitle`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BangumiTitle {
+    /// 例如 `官方标题，日语`。
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub language: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub title: String,
+}
+
+/// 作品的一个标签（`BangumiTag`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BangumiTag {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub name: String,
+    /// 有多少人打了这个标签。
+    #[serde(default)]
+    pub count: i64,
+}
+
+/// 作品在其他资料站上的页面（`BangumiOnlineDatabase`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnlineDatabase {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub name: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub url: String,
+}
+
+/// 一部作品的详情（`GET /api/v2/bangumi/{animeId}` 的 `BangumiDetails`），只取界面用到的字段。
+/// 也原样存进缓存文件，所以能序列化。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BangumiDetails {
+    pub anime_id: i64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub anime_title: String,
+    #[serde(default)]
+    pub image_url: Option<String>,
+    /// 作品类别的文字说明，例如 `TV动画`。
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub type_description: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub titles: Vec<BangumiTitle>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub episodes: Vec<BangumiEpisode>,
+    /// 番剧简介。
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub summary: String,
+    /// 制作信息，每条是 `键: 值`。
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub metadata: Vec<String>,
+    /// 各站评分：站名和分数，按弹弹play 给的顺序。
+    #[serde(default, deserialize_with = "ordered_scores")]
+    pub rating_details: Vec<(String, f64)>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub tags: Vec<BangumiTag>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub online_databases: Vec<OnlineDatabase>,
+    #[serde(default)]
+    pub is_on_air: bool,
+    /// 综合评分，0 到 10。
+    #[serde(default)]
+    pub rating: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BangumiDetailsBody {
+    #[serde(default)]
+    pub bangumi: Option<BangumiDetails>,
+}
+
+/// 把接口的 `{"站名": 分数, …}` 按出现顺序读成列表；也读缓存文件里存成的
+/// `[["站名", 分数], …]`。`null` 读成空列表。
+fn ordered_scores<'de, D>(deserializer: D) -> Result<Vec<(String, f64)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct Scores;
+    impl<'de> serde::de::Visitor<'de> for Scores {
+        type Value = Vec<(String, f64)>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an object of site names to scores")
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut scores = Vec::new();
+            while let Some((site, score)) = map.next_entry::<String, Option<f64>>()? {
+                if let Some(score) = score {
+                    scores.push((site, score));
+                }
+            }
+            Ok(scores)
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut scores = Vec::new();
+            while let Some(score) = seq.next_element::<(String, f64)>()? {
+                scores.push(score);
+            }
+            Ok(scores)
+        }
+    }
+    deserializer.deserialize_any(Scores)
+}
+
+/// 作品的一条短评（`BangumiComment`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BangumiComment {
+    #[serde(default)]
+    pub id: i64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub user_name: String,
+    /// 来自哪个网站，例如 `Bangumi`。
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub source: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub text: String,
+    /// 0 到 10；0 表示没打分。
+    #[serde(default)]
+    pub rating: i64,
+}
+
+/// 一页短评（`GET /api/v2/bangumi/{animeId}/comments`）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BangumiComments {
+    /// 这一部作品一共多少条（不是这一页的条数）。
+    #[serde(default)]
+    pub count: i64,
+    #[serde(default)]
+    pub has_more: bool,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub comments: Vec<BangumiComment>,
+}
+
 /// 调用失败时，每个应答都可能带有的内容。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -263,6 +435,70 @@ mod tests {
         assert_eq!(first.rating, 8.5);
         assert_eq!(body.bangumi_list[1].anime_title, "");
         assert_eq!(body.bangumi_list[1].image_url, None);
+    }
+
+    #[test]
+    fn bangumi_details_are_read_with_the_scores_in_their_order() {
+        let body: BangumiDetailsBody = decode(
+            r#"{
+                "bangumi": {
+                    "type": "tvseries", "typeDescription": "TV动画",
+                    "titles": [{"language": "官方标题，日语", "title": "さよならララ"}],
+                    "seasons": [],
+                    "episodes": [
+                        {"seasonId": null, "episodeId": 186430001, "episodeTitle": "第1话 人鱼公主菈菈",
+                         "episodeNumber": "1", "lastWatched": null, "airDate": "2026-07-06T00:00:00"},
+                        {"episodeId": 186439001, "episodeTitle": "S1 ララと", "episodeNumber": "S1"}
+                    ],
+                    "summary": "很久很久以前", "intro": "", "metadata": ["话数: 12"],
+                    "ratingDetails": {"弹弹play连载中评分": 9.11, "Bangumi评分": 6.4, "空": null},
+                    "relateds": [], "similars": null,
+                    "tags": [{"id": 2, "name": "恋爱", "count": 825}],
+                    "onlineDatabases": [{"name": "TMDB", "url": "https://www.themoviedb.org/tv/295071"}],
+                    "trailers": [],
+                    "animeId": 18643, "bangumiId": "18643", "animeTitle": "再见，拉拉",
+                    "imageUrl": "https://img.example/18643.jpg", "isOnAir": false, "airDay": 1,
+                    "rating": 6.9
+                },
+                "errorCode": 0, "success": true, "errorMessage": ""
+            }"#,
+        )
+        .unwrap();
+        let details = body.bangumi.unwrap();
+        assert_eq!(details.anime_id, 18643);
+        assert_eq!(details.type_description, "TV动画");
+        assert_eq!(details.episodes[1].episode_number, "S1");
+        assert_eq!(details.episodes[1].air_date, None);
+        assert_eq!(
+            details.rating_details,
+            [
+                ("弹弹play连载中评分".to_string(), 9.11),
+                ("Bangumi评分".to_string(), 6.4)
+            ]
+        );
+        assert_eq!(details.tags[0].name, "恋爱");
+        // 存进缓存再读回来，内容不变。
+        let stored = serde_json::to_string(&details).unwrap();
+        assert_eq!(
+            serde_json::from_str::<BangumiDetails>(&stored).unwrap(),
+            details
+        );
+    }
+
+    #[test]
+    fn a_missing_bangumi_and_a_page_of_comments_are_read() {
+        let body: BangumiDetailsBody = decode(r#"{"bangumi": null, "success": true}"#).unwrap();
+        assert!(body.bangumi.is_none());
+        let comments: BangumiComments = decode(
+            r#"{"count": 20, "hasMore": true, "comments": [
+                {"id": 1, "userId": 0, "userName": "104期的杂鱼", "imageUrl": null,
+                 "source": "Bangumi", "text": "第一集", "rating": 5, "updatedTime": "2026-11-18T04:19:34"}
+            ], "success": true}"#,
+        )
+        .unwrap();
+        assert_eq!(comments.count, 20);
+        assert_eq!(comments.comments[0].user_name, "104期的杂鱼");
+        assert_eq!(comments.comments[0].rating, 5);
     }
 
     #[test]

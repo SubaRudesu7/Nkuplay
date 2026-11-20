@@ -4,8 +4,8 @@ use crate::auth::Credentials;
 use crate::comment::{Comment, CommentsBody};
 use crate::error::Error;
 use crate::model::{
-    BangumiIntro, BangumiListBody, MatchRequest, MatchResult, SearchEpisodesBody, SearchedAnime,
-    decode,
+    BangumiComments, BangumiDetails, BangumiDetailsBody, BangumiIntro, BangumiListBody,
+    MatchRequest, MatchResult, SearchEpisodesBody, SearchedAnime, decode,
 };
 use serde::de::DeserializeOwned;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -119,6 +119,21 @@ impl Client {
         )];
         let body: BangumiListBody = self.get("/api/v2/bangumi/shin", &query)?;
         Ok(body.bangumi_list)
+    }
+
+    /// 一部作品的详情：简介、评分、标签、剧集、制作信息等。弹弹play 没有这部作品时为空。
+    pub fn bangumi(&self, anime_id: i64) -> Result<Option<BangumiDetails>, Error> {
+        let body: BangumiDetailsBody = self.get(&format!("/api/v2/bangumi/{anime_id}"), &[])?;
+        Ok(body.bangumi)
+    }
+
+    /// 一部作品的短评，第 `page` 页（从 0 开始，最大 9），每页 20 条。
+    pub fn bangumi_comments(&self, anime_id: i64, page: u32) -> Result<BangumiComments, Error> {
+        let page = page.min(9).to_string();
+        self.get(
+            &format!("/api/v2/bangumi/{anime_id}/comments"),
+            &[("page", page.as_str())],
+        )
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T, Error> {

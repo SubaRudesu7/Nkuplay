@@ -16,6 +16,11 @@ name = { "en" = "Nkuplay", "zh-Hans" = "Nkuplay" }
 # 显示在安装器和包管理器里。
 # publisher = "Your Name"
 
+# 随应用发布的文件。详情页的彩色小图标（播放、看完的对勾、评分的星）是 SVG：
+# WinUI 上图标不能单独上色，所以画成固定颜色的图片。
+[resources]
+paths = ["nkuplay-ui/icons"]
+
 [languages]
 supported = ["en", "zh-Hans"]
 default = "en"

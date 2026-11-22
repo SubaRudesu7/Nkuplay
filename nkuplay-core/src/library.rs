@@ -40,6 +40,16 @@ pub struct RecentFile {
     pub shot: Option<PathBuf>,
 }
 
+/// 一部番详情页的背景怎么显示。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackdropChoice {
+    /// 固定一张；否则轮换。
+    pub fixed: bool,
+    /// 固定的那张剧照的文件名；还没选过时为空。
+    #[serde(default)]
+    pub still: Option<String>,
+}
+
 /// 媒体库里的一个文件夹。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FolderEntry {
@@ -135,6 +145,9 @@ pub struct Library {
     /// 视频地址到看到哪里。
     #[serde(default)]
     pub progress: BTreeMap<String, Watched>,
+    /// 详情页的合并键到它的背景设置。
+    #[serde(default)]
+    pub backdrops: BTreeMap<String, BackdropChoice>,
 }
 
 impl Library {
@@ -159,6 +172,15 @@ impl Library {
                 let _ = std::fs::remove_file(shot);
             }
         }
+    }
+
+    /// 把 `url` 记成看完了（时刻是 `at`）。总时长沿用以前记下的，不知道时随便给一个。
+    pub fn finish(&mut self, url: &str, at: u64) {
+        let duration = self
+            .progress
+            .get(url)
+            .map_or(1, |watched| watched.duration_ms.max(1));
+        self.record(url, duration, duration, at);
     }
 
     /// 去掉继续观看里 `keep` 说不要的视频，连同它们的画面。
@@ -468,6 +490,17 @@ mod tests {
         }
         assert!(!second.exists());
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_video_can_be_marked_as_finished() {
+        let mut library = Library::default();
+        library.finish("file:///a.mkv", 1);
+        assert!(library.progress["file:///a.mkv"].finished());
+        library.record("file:///b.mkv", 100, 1_000, 1);
+        library.finish("file:///b.mkv", 2);
+        assert_eq!(library.progress["file:///b.mkv"].duration_ms, 1_000);
+        assert!(library.progress["file:///b.mkv"].finished());
     }
 
     #[test]

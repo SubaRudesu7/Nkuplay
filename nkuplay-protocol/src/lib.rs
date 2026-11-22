@@ -66,6 +66,17 @@ pub mod nkuplay {
         Failed,
     }
 
+    /// 详情页剧集的分组。
+    #[value]
+    pub enum DetailGroup {
+        #[label(tr! { "en" => "Episodes", "zh-Hans" => "正片" })]
+        Main,
+        #[label(tr! { "en" => "Specials", "zh-Hans" => "特别篇" })]
+        Special,
+        #[label(tr! { "en" => "OP / ED", "zh-Hans" => "OP / ED" })]
+        Extra,
+    }
+
     /// 最近看过的一个视频。
     #[value]
     pub struct Recent {
@@ -97,9 +108,6 @@ pub mod nkuplay {
         /// 海报地址；`has_poster` 为假时没有意义。
         pub poster: MediaSource,
         pub has_poster: bool,
-        /// 进详情页时海报飞过去用的标识，和 `detail_hero` 对上。
-        #[content]
-        pub hero: String,
     }
 
     /// 媒体库里的一个文件夹。
@@ -126,9 +134,6 @@ pub mod nkuplay {
         pub has_poster: bool,
         /// 有几集。
         pub episodes: i64,
-        /// 进详情页时海报飞过去用的标识，和 `detail_hero` 对上。
-        #[content]
-        pub hero: String,
     }
 
     /// 详情页剧集列表里的一集：弹弹play 的一集（对上了本地文件或没对上），或本地多出来的文件。
@@ -153,6 +158,9 @@ pub mod nkuplay {
         pub finished: bool,
         /// “继续”指向这一集。
         pub current: bool,
+        /// 缩略图（这一集的第一张剧照）；`has_thumb` 为假时没有意义。
+        pub thumb: MediaSource,
+        pub has_thumb: bool,
     }
 
     /// 作品的一个标签。
@@ -242,7 +250,6 @@ pub mod nkuplay {
         pub recents: Vec<Recent>,
         /// `recents` 的个数。
         pub recent_count: i64,
-
         /// 本季新番列表的阶段。
         pub shin: ShinStatus,
         /// 缓存的新番列表是上一季或更早取的，应当刷新。
@@ -274,18 +281,20 @@ pub mod nkuplay {
         /// 作品名。
         #[content]
         pub detail_title: String,
-        /// 其他语言的标题，用 ` · ` 连起来；没有时为空。
+        /// 日文标题；没有或和作品名一样时为空。
         #[content]
-        pub detail_other_titles: String,
+        pub detail_native_title: String,
         pub detail_poster: MediaSource,
         pub detail_has_poster: bool,
-        /// 从哪张海报点进来的（`Series::hero` 或 `ShinAnime::hero`）；海报从那里飞到横幅上。
-        #[content]
-        pub detail_hero: String,
+
         /// 背景图：没有或一张。
         pub detail_backdrop: Vec<Backdrop>,
-        /// 有不止一张剧照，界面定时换下一张。
+        /// 背景在轮换（不固定，而且有不止一张剧照）：界面定时换下一张。
         pub detail_rotates: bool,
+        /// 背景固定一张；每部番各记各的，默认轮换。
+        pub detail_fixed: bool,
+        /// 有不止一张剧照可以切换。
+        pub detail_can_switch: bool,
         /// 弹弹play 的资料已经有了（下面的评分、类别、简介等有意义）。
         pub detail_known: bool,
         /// 正在向弹弹play 取资料。
@@ -312,25 +321,25 @@ pub mod nkuplay {
         #[content]
         pub detail_summary: String,
 
-        /// 剧集，按 `detail_descending` 排好。
+        /// 正在看哪一组剧集，以及这一组的剧集。
+        pub detail_group: DetailGroup,
         pub detail_episodes: Vec<DetailEpisode>,
-        /// 弹弹play 的正片集数、特别篇和 OP/ED 个数、本地有的集数。
+        /// 剧集条该滚到哪一集；`detail_strip_serial` 每变一次就滚一次。
+        pub detail_strip_at: i64,
+        pub detail_strip_serial: i64,
+        /// 三组各有几集，弹弹play 列出的正片集数，和一集多少分钟（不知道时为 0）。
         pub detail_main_count: i64,
         pub detail_special_count: i64,
-        pub detail_local_count: i64,
-        /// 上次看的那一集：`detail_has_last` 为真时，`detail_last_code` 非空就是它（`S1`），
-        /// 否则是第 `detail_last_number` 集（0 表示认不出集数的文件）。
-        pub detail_has_last: bool,
-        #[content]
-        pub detail_last_code: String,
-        pub detail_last_number: i64,
-        /// 剧集倒着排。
-        pub detail_descending: bool,
+        pub detail_extra_count: i64,
+        pub detail_episode_count: i64,
+        pub detail_minutes: i64,
         /// 本地有可以播放的一集：“继续”按钮可用，播放 `detail_resume`。
         pub detail_can_resume: bool,
         pub detail_resume: MediaSource,
         /// 这部番看过（按钮写“继续”，否则写“播放”）。
         pub detail_started: bool,
+        /// “继续”那一集看到总时长的几分之几，0 到 1。
+        pub detail_resume_fraction: f64,
 
         /// 短评（第一页）、一共多少条、来自哪个网站。
         pub detail_comments: Vec<DetailComment>,
@@ -413,8 +422,19 @@ pub mod nkuplay {
         /// 不管缓存，向弹弹play 重新取详情页的资料。
         fn refresh_details(&mut self) -> Result<(), CommandError>;
 
-        /// 剧集正着排和倒着排之间切换。
-        fn toggle_episode_order(&mut self) -> Result<(), CommandError>;
+        /// 剧集条只显示 `group` 这一组。
+        #[idempotent]
+        fn show_group(&mut self, group: DetailGroup) -> Result<(), CommandError>;
+
+        /// 剧集条从现在最前面的那一集（编号 `at`）往后翻 `pages` 屏，负数往前翻。
+        fn page_episodes(&mut self, at: i64, pages: i64) -> Result<(), CommandError>;
+
+        /// 把“继续”指向的那一集记成看完了。
+        fn mark_watched(&mut self) -> Result<(), CommandError>;
+
+        /// 背景固定一张（`fixed` 为真），或轮换。每部番各记各的。
+        #[idempotent]
+        fn set_backdrop_fixed(&mut self, fixed: bool) -> Result<(), CommandError>;
 
         /// 忘掉详情页这部番每一集看到哪里。
         fn clear_progress(&mut self) -> Result<(), CommandError>;
@@ -422,7 +442,7 @@ pub mod nkuplay {
         /// 评论在只显示几条和显示这一页全部之间切换。
         fn toggle_comments(&mut self) -> Result<(), CommandError>;
 
-        /// 背景换下一张剧照。
+        /// 背景换下一张剧照；固定着的就固定在换到的那一张上。
         fn next_backdrop(&mut self) -> Result<(), CommandError>;
 
         /// 记下正在看的视频看到了哪里：`position_ms` 和 `duration_ms` 是播放器报的位置和总时长。

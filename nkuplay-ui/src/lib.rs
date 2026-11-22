@@ -3,7 +3,7 @@
 //! 每段文字都在显示它的地方写出所有语言的版本，每个按钮都执行协议里的一条命令。
 
 use bern::prelude::*;
-use nkuplay_protocol::nkuplay::{self, ShinStatus};
+use nkuplay_protocol::nkuplay::{self, DetailGroup, ShinStatus};
 
 /// 左侧导航能去的页面。
 #[bern::value]
@@ -37,6 +37,8 @@ pub struct MainDraft {
     pub over: bool,
     /// 左侧导航选中的页面。
     pub page: Page,
+    /// 详情页剧集条最前面的那一集。
+    pub strip: i64,
     /// 最近一次选择的要加入媒体库的文件夹。
     pub folder: MediaSource,
 }
@@ -321,13 +323,7 @@ pub fn shin_grid(app: nkuplay::Client, loading: bool) -> impl View {
                 ) {
                     Column(gap: 6) {
                         if anime.has_poster {
-                            // 点开的那张在详情页打开时让开，飞到详情页的横幅上；关掉时再飞回来。
-                            // 只有它让开：让开的海报会浮在最上面淡出，全部让开就会盖住详情页。
-                            if app.detail_open && app.detail_hero == anime.hero {
-                                Canvas(height: 187)
-                            } else {
-                                Image(source: anime.poster, height: 187, fit: cover, corner: 6, hero: poster, hero_key: anime.hero)
-                            }
+                            Image(source: anime.poster, height: 187, fit: cover, corner: 6)
                         }
                         Text(content: anime.title, lines: 2)
                     }
@@ -441,13 +437,7 @@ pub fn series_grid(app: nkuplay::Client, loading: bool) -> impl View {
                 ) {
                     Column(gap: 6) {
                         if show.has_poster {
-                            // 点开的那张在详情页打开时让开，飞到详情页的横幅上；关掉时再飞回来。
-                            // 只有它让开：让开的海报会浮在最上面淡出，全部让开就会盖住详情页。
-                            if app.detail_open && app.detail_hero == show.hero {
-                                Canvas(height: 187)
-                            } else {
-                                Image(source: show.poster, height: 187, fit: cover, corner: 6, hero: poster, hero_key: show.hero)
-                            }
+                            Image(source: show.poster, height: 187, fit: cover, corner: 6)
                         } else {
                             Stack(height: 187) {
                                 Canvas(height: 187) {
@@ -473,100 +463,110 @@ pub fn series_grid(app: nkuplay::Client, loading: bool) -> impl View {
     }
 }
 
-/// 番剧详情页：从海报墙或本季新番点进来，占满窗口（不显示左侧导航）。
-/// 背景是“继续”那一集的剧照（没有时是虚化的海报），左边和下半部用页面底色渐隐托住文字；
-/// 上面直接放横幅、剧集和底部两栏，没有面板和卡片底色。
+/// 番剧详情页：从海报墙或新番点进来，盖满窗口。上半部是选中那一集的剧照（没有时是虚化的海报），
+/// 左边和下面用页面底色渐隐托住文字；往下依次是横幅、剧集条、评论和资料，一起滚动。
 #[component]
 pub fn details_page(app: nkuplay::Client) -> impl View {
     ui! {
-        Stack(under_bars: true, appear: page_in, disappear: fade) {
-            // 换图时旧的淡出、新的淡入。
-            ForEach(items: app.detail_backdrop, key: id) |backdrop| {
-                if backdrop.still {
-                    Image(source: backdrop.source, fit: cover, appear: fade, disappear: fade)
-                } else {
-                    Image(source: backdrop.source, fit: cover, blur: 48, appear: fade, disappear: fade)
-                }
-            }
-            // 左侧和下半部用页面底色托住文字，右上角露出画面（WinUI 商店的做法）。
-            Canvas {
-                Shape(kind: rect, fill: surface.canvas, opacity: 0.3)
-            }
-            Canvas {
-                Shape(kind: rect, fill: surface.canvas, fade: right, opacity: 0.85)
-            }
-            Canvas {
-                Shape(kind: rect, fill: surface.canvas, fade: up, opacity: 1)
-            }
+        Stack(under_bars: true, variant: panel_ground, appear: page_in, disappear: fade) {
             ScrollView {
-                Column(gap: 22, padding_x: 48, padding_y: 40) {
-                    Row {
-                        Button(
-                            id: back_from_details,
-                            label: tr! { "en" => "Back", "zh-Hans" => "返回" },
-                            icon: "arrow.left"
-                        ) => app.close_details()
-                        Spacer
-                    }
-                    detail_banner(app: app)
-                    detail_episodes(app: app)
-                    if app.detail_known {
-                        detail_bottom(app: app)
+                Stack(align: top) {
+                    detail_backdrop(app: app)
+                    Column(gap: 30, padding_x: 56, padding_y: 40) {
+                        // 返回写在这里，不放进横幅：有自己的控件，Bern 才把这一页当成盖住窗口的一页，
+                        // 收起标题栏上的图标和名字。
+                        Row(gap: 12, align: center) {
+                            IconButton(
+                                id: back_from_details,
+                                icon: "arrow.left",
+                                label: tr! { "en" => "Back", "zh-Hans" => "返回" },
+                                height: 34,
+                                variant: round
+                            ) => app.close_details()
+                            Text(content: app.detail_title, lines: 1)
+                            Spacer
+                        }
+                        detail_banner(app: app)
+                        detail_episodes(app: app)
+                        if app.detail_known {
+                            Divider
+                            detail_bottom(app: app)
+                        }
                     }
                 }
             }
-            // 有几张剧照时慢慢轮换。
+            // 轮换时每 8 秒换下一张。
             Timer(interval: 8, enabled: app.detail_rotates) => app.next_backdrop()
             Shortcut(key: "escape") => app.close_details()
         }
     }
 }
 
-/// 横幅：小海报；作品名、其他标题、评分和概况、标签、简介、“继续”和“刷新资料”。
+/// 背景：剧照铺在上半部，左边和下面渐隐成页面底色。
+#[component]
+pub fn detail_backdrop(app: nkuplay::Client) -> impl View {
+    ui! {
+        Column {
+            Stack(height: 640) {
+                // 换图时旧的淡出、新的淡入。
+                ForEach(items: app.detail_backdrop, key: id) |backdrop| {
+                    if backdrop.still {
+                        Image(source: backdrop.source, fit: cover, appear: fade, disappear: fade)
+                    } else {
+                        Image(source: backdrop.source, fit: cover, blur: 48, appear: fade, disappear: fade)
+                    }
+                }
+                Row(gap: 0) {
+                    Canvas(width: 340) {
+                        Shape(kind: rect, fill: surface.canvas)
+                    }
+                    Canvas(width: 460) {
+                        Shape(kind: rect, fill: surface.canvas, fade: right)
+                    }
+                    Spacer
+                }
+                Column {
+                    // 托住右上角的窗口按钮。
+                    Canvas(height: 72) {
+                        Shape(kind: rect, fill: surface.canvas, fade: down, opacity: 0.8)
+                    }
+                    Spacer
+                    Canvas(height: 260) {
+                        Shape(kind: rect, fill: surface.canvas, fade: up)
+                    }
+                }
+            }
+            Spacer
+        }
+    }
+}
+
+/// 横幅：大号作品名、日文名、概况、标签、简介；“继续”、标记看完、刷新、背景设置。
 #[component]
 pub fn detail_banner(app: nkuplay::Client) -> impl View {
     ui! {
-        Row(gap: 28, align: top) {
-            if app.detail_has_poster {
-                Image(source: app.detail_poster, width: 150, height: 212, fit: cover, corner: 8, hero: poster, hero_key: app.detail_hero)
-            }
-            Column(gap: 10) {
-                Text(content: app.detail_title, font_size: 34, bold: true, lines: 2)
-                if app.detail_other_titles != "" {
-                    Text(content: app.detail_other_titles, emphasis: secondary, lines: 1)
+        Column(gap: 30) {
+            Column(gap: 12, width: 480) {
+                Text(content: app.detail_title, font_size: 44, bold: true, lines: 2)
+                if app.detail_native_title != "" {
+                    Text(content: app.detail_native_title, emphasis: secondary, lines: 1)
                 }
                 if app.detail_known {
-                    Row(gap: 8, align: center) {
-                        if app.detail_rating > 0.0 {
-                            Row(gap: 1, align: center) {
-                                star(rating: app.detail_rating, full_at: 1.5, half_at: 0.5)
-                                star(rating: app.detail_rating, full_at: 3.5, half_at: 2.5)
-                                star(rating: app.detail_rating, full_at: 5.5, half_at: 4.5)
-                                star(rating: app.detail_rating, full_at: 7.5, half_at: 6.5)
-                                star(rating: app.detail_rating, full_at: 9.5, half_at: 8.5)
-                            }
-                            Text(content: app.detail_rating_text, font_size: 20, bold: true, color: status.error)
-                        }
-                        detail_overview(app: app)
-                    }
-                    Flow(gap: 6) {
-                        // 标签是小圆角方块：一层淡底和细边，上面是字。
+                    detail_overview(app: app)
+                    Flow(gap: 8) {
                         ForEach(items: app.detail_tags, key: id) |tag| {
                             Stack {
                                 Canvas {
-                                    Shape(kind: rounded, corner: 4, fill: surface.canvas, opacity: 0.6)
-                                    Shape(kind: rounded, corner: 4, stroke: control.border, stroke_width: 1)
+                                    Shape(kind: capsule, fill: surface.raised)
                                 }
-                                Row(padding_x: 10, padding_y: 3) {
+                                Row(padding_x: 14, padding_y: 4) {
                                     Text(content: tag.name, style: caption)
                                 }
                             }
                         }
                     }
                     if app.detail_summary != "" {
-                        Column(width: 720) {
-                            Text(content: app.detail_summary, lines: 3)
-                        }
+                        Text(content: app.detail_summary, lines: 3, line_height: 26)
                     }
                 }
                 if app.detail_error != "" {
@@ -575,223 +575,279 @@ pub fn detail_banner(app: nkuplay::Client) -> impl View {
                         color: status.error
                     )
                 }
-                Row(gap: 8, align: center) {
-                    if app.detail_started {
-                        Button(
-                            id: resume_show,
-                            label: tr! { "en" => "Continue", "zh-Hans" => "继续" },
-                            icon: "play",
-                            prominence: prominent,
-                            enabled: app.detail_can_resume
-                        ) => app.open_file(app.detail_resume)
-                    } else {
-                        Button(
-                            id: start_show,
-                            label: tr! { "en" => "Play", "zh-Hans" => "播放" },
-                            icon: "play",
-                            prominence: prominent,
-                            enabled: app.detail_can_resume
-                        ) => app.open_file(app.detail_resume)
-                    }
-                    IconButton(
-                        id: refresh_details,
-                        icon: "arrow.clockwise",
-                        label: tr! { "en" => "Refresh Details", "zh-Hans" => "刷新资料" },
-                        enabled: app.detail_known || app.detail_error != ""
-                    ) => app.refresh_details()
-                    if app.detail_loading {
-                        Progress()
-                    }
-                }
             }
+            detail_actions(app: app)
         }
     }
 }
 
-/// 评分里的一颗星：评分到 `full_at` 是整颗，到 `half_at` 是半颗，否则是空心的。
-#[component]
-pub fn star(rating: f64, full_at: f64, half_at: f64) -> impl View {
-    ui! {
-        if rating >= full_at {
-            Svg(source: "nkuplay-ui/icons/star-full.svg", width: 16, height: 16)
-        } else {
-            if rating >= half_at {
-                Svg(source: "nkuplay-ui/icons/star-half.svg", width: 16, height: 16)
-            } else {
-                Svg(source: "nkuplay-ui/icons/star-empty.svg", width: 16, height: 16)
-            }
-        }
-    }
-}
-
-/// 概况：类别 · 集数 · 开播年月 · 连载中或已完结。
+/// 概况：年份 · 类别 · 一集多长 · 几话 · 评分，后面是连载中或已完结。
 #[component]
 pub fn detail_overview(app: nkuplay::Client) -> impl View {
     ui! {
-        Row(gap: 6, align: center) {
+        Row(gap: 8, align: center) {
+            if app.detail_has_premiere {
+                Text(content: app.detail_year, emphasis: secondary)
+                Text(content: tr! { "en" => "·", "zh-Hans" => "·" }, emphasis: tertiary)
+            }
             if app.detail_kind != "" {
                 Text(content: app.detail_kind, emphasis: secondary)
-                Text(content: tr! { "en" => "·", "zh-Hans" => "·" }, emphasis: secondary)
+                Text(content: tr! { "en" => "·", "zh-Hans" => "·" }, emphasis: tertiary)
+            }
+            if app.detail_minutes > 0 {
+                Text(content: tr! { "en" => "{n} min", "zh-Hans" => "{n} 分钟"; n: app.detail_minutes }, emphasis: secondary)
+                Text(content: tr! { "en" => "·", "zh-Hans" => "·" }, emphasis: tertiary)
             }
             Text(
                 content: tr! {
                     "en" => "{count, plural, one {# episode} other {# episodes}}",
                     "zh-Hans" => "{count} 话";
-                    count: app.detail_main_count
+                    count: app.detail_episode_count
                 },
                 emphasis: secondary
             )
-            if app.detail_has_premiere {
-                Text(
-                    content: tr! {
-                        "en" => "· Premiered {month}/{year}",
-                        "zh-Hans" => "· {year} 年 {month} 月开播";
-                        year: app.detail_year,
-                        month: app.detail_month
-                    },
-                    emphasis: secondary
-                )
+            if app.detail_rating > 0.0 {
+                Text(content: tr! { "en" => "·", "zh-Hans" => "·" }, emphasis: tertiary)
+                Label(title: app.detail_rating_text, icon: "star.fill", display: icon, color: status.error, font_size: 13)
+                Text(content: app.detail_rating_text, bold: true, color: status.error)
             }
-            if app.detail_on_air {
-                Text(content: tr! { "en" => "· Airing", "zh-Hans" => "· 连载中" }, emphasis: secondary)
-            } else {
-                Text(content: tr! { "en" => "· Finished", "zh-Hans" => "· 已完结" }, emphasis: secondary)
-            }
-        }
-    }
-}
-
-/// 剧集：统计、清理记录和正序/倒序，下面三列的剧集行（特别篇和 OP/ED 排在正片后面）。
-#[component]
-pub fn detail_episodes(app: nkuplay::Client) -> impl View {
-    ui! {
-        Column(gap: 8) {
-            Row(gap: 16, align: center) {
-                if app.detail_known {
-                    Text(
-                        content: tr! { "en" => "{count} episodes", "zh-Hans" => "共 {count} 话"; count: app.detail_main_count },
-                        emphasis: secondary
-                    )
-                    if app.detail_special_count > 0 {
-                        Text(
-                            content: tr! { "en" => "Specials {count}", "zh-Hans" => "特别篇 {count}"; count: app.detail_special_count },
-                            emphasis: secondary
-                        )
-                    }
-                }
-                Text(
-                    content: tr! { "en" => "{count} on disk", "zh-Hans" => "本地 {count} 话"; count: app.detail_local_count },
-                    emphasis: secondary
-                )
-                if app.detail_has_last {
-                    if app.detail_last_code != "" {
-                        Text(
-                            content: tr! { "en" => "Last watched: {code}", "zh-Hans" => "上次观看：{code}"; code: app.detail_last_code },
-                            emphasis: secondary
-                        )
-                    } else {
-                        if app.detail_last_number > 0 {
-                            Text(
-                                content: tr! { "en" => "Last watched: episode {n}", "zh-Hans" => "上次观看：第 {n} 话"; n: app.detail_last_number },
-                                emphasis: secondary
-                            )
-                        }
-                    }
-                }
-                Spacer
-                Button(
-                    id: clear_progress,
-                    label: tr! { "en" => "Clear History", "zh-Hans" => "清理记录" },
-                    icon: "trash",
-                    prominence: plain,
-                    enabled: app.detail_started
-                ) => app.clear_progress()
-                if app.detail_descending {
-                    Button(
-                        id: order_ascending,
-                        label: tr! { "en" => "Newest First", "zh-Hans" => "倒序" },
-                        icon: "arrow.up.arrow.down",
-                        prominence: plain
-                    ) => app.toggle_episode_order()
-                } else {
-                    Button(
-                        id: order_descending,
-                        label: tr! { "en" => "Oldest First", "zh-Hans" => "正序" },
-                        icon: "arrow.up.arrow.down",
-                        prominence: plain
-                    ) => app.toggle_episode_order()
-                }
-            }
-            Divider
-            Grid(min_width: 360, gap: 24, row_gap: 2) {
-                ForEach(items: app.detail_episodes, key: id) |episode| {
-                    if episode.local {
-                        Button(
-                            id: play_episode,
-                            label: tr! { "en" => "Play {title}", "zh-Hans" => "播放{title}"; title: episode.title }
-                        ) {
-                            episode_row(episode: episode)
-                        } => app.open_file(episode.source)
-                    } else {
-                        episode_row(episode: episode)
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// 剧集的一行：播放图标（本地有的蓝色）、第几话和标题（本地没有的变淡）、状态、看完的对勾。
-/// “继续”指向的那一集整行浅蓝底。
-#[component]
-pub fn episode_row(episode: nkuplay::DetailEpisode) -> impl View {
-    ui! {
-        Stack {
-            if episode.current {
+            Stack {
                 Canvas {
-                    Shape(kind: rounded, corner: 6, fill: accent, opacity: 0.14)
+                    Shape(kind: rounded, corner: 4, stroke: control.border, stroke_width: 1)
                 }
-            }
-            Row(gap: 10, padding_x: 10, padding_y: 8, align: center) {
-                if episode.local {
-                    Svg(source: "nkuplay-ui/icons/play-accent.svg", width: 12, height: 12)
-                } else {
-                    Svg(source: "nkuplay-ui/icons/play-muted.svg", width: 12, height: 12)
-                }
-                if episode.code != "" {
-                    Text(content: episode.code, bold: episode.local, emphasis: secondary)
-                } else {
-                    if episode.number > 0 {
-                        if episode.local {
-                            Text(content: tr! { "en" => "Ep {n}", "zh-Hans" => "第{n}话"; n: episode.number }, bold: true)
-                        } else {
-                            Text(content: tr! { "en" => "Ep {n}", "zh-Hans" => "第{n}话"; n: episode.number }, emphasis: secondary)
-                        }
+                Row(padding_x: 6, padding_y: 1) {
+                    if app.detail_on_air {
+                        Text(content: tr! { "en" => "Airing", "zh-Hans" => "连载中" }, style: caption, emphasis: secondary)
                     } else {
-                        Text(content: tr! { "en" => "Other", "zh-Hans" => "其他" }, emphasis: secondary)
+                        Text(content: tr! { "en" => "Finished", "zh-Hans" => "已完结" }, style: caption, emphasis: secondary)
                     }
                 }
-                if episode.local {
-                    Text(content: episode.title, lines: 1)
+            }
+        }
+    }
+}
+
+/// 一排按钮：继续（底下的浅色是看到的进度）、标记看完、刷新资料、背景设置。
+#[component]
+pub fn detail_actions(app: nkuplay::Client) -> impl View {
+    ui! {
+        Row(gap: 12, align: center) {
+            Button(
+                id: resume_show,
+                label: tr! { "en" => "Continue", "zh-Hans" => "继续" },
+                enabled: app.detail_can_resume
+            ) {
+                Stack(width: 120, height: 40, align: center) {
+                    Canvas(width: 120, height: 40) {
+                        Shape(kind: capsule, fill: surface.raised)
+                        Shape(kind: capsule, stroke: control.border, stroke_width: 1)
+                    }
+                    Rail {
+                        Canvas(from: 0, to: app.detail_resume_fraction) {
+                            Shape(kind: capsule, fill: accent, opacity: 0.2)
+                        }
+                    }
+                    Row(gap: 8, align: center) {
+                        Label(title: app.detail_title, icon: "play.fill", display: icon, color: accent)
+                        if app.detail_started {
+                            Text(content: tr! { "en" => "Continue", "zh-Hans" => "继续" }, bold: true)
+                        } else {
+                            Text(content: tr! { "en" => "Play", "zh-Hans" => "播放" }, bold: true)
+                        }
+                    }
+                }
+            } => app.open_file(app.detail_resume)
+            IconButton(
+                id: mark_watched,
+                icon: "checkmark",
+                label: tr! { "en" => "Mark as Watched", "zh-Hans" => "标记看完" },
+                height: 40,
+                variant: round_large,
+                enabled: app.detail_can_resume
+            ) => app.mark_watched()
+            IconButton(
+                id: refresh_details,
+                icon: "arrow.clockwise",
+                label: tr! { "en" => "Refresh Details", "zh-Hans" => "刷新资料" },
+                height: 40,
+                variant: round_large,
+                enabled: !app.detail_loading
+            ) => app.refresh_details()
+            PopoverButton(
+                id: backdrop_menu,
+                label: tr! { "en" => "Background", "zh-Hans" => "背景" },
+                icon: "ellipsis",
+                height: 40,
+                shape: capsule
+            ) {
+                Column(gap: 2, width: 232) {
+                    Row(padding_x: 10, padding_y: 4) {
+                        Text(content: tr! { "en" => "Background", "zh-Hans" => "背景" }, style: caption, emphasis: secondary)
+                    }
+                    Button(id: backdrop_rotate, label: tr! { "en" => "Rotate", "zh-Hans" => "轮换" }) {
+                        Row(padding_x: 10, padding_y: 8, align: center) {
+                            Text(content: tr! { "en" => "Rotate", "zh-Hans" => "轮换" })
+                            Spacer
+                            if !app.detail_fixed {
+                                Label(title: app.detail_title, icon: "checkmark", display: icon, color: accent)
+                            }
+                        }
+                    } => app.set_backdrop_fixed(false)
+                    Button(id: backdrop_fixed, label: tr! { "en" => "Fixed", "zh-Hans" => "固定" }) {
+                        Row(padding_x: 10, padding_y: 8, align: center) {
+                            Text(content: tr! { "en" => "Fixed", "zh-Hans" => "固定" })
+                            Spacer
+                            if app.detail_fixed {
+                                Label(title: app.detail_title, icon: "checkmark", display: icon, color: accent)
+                            }
+                        }
+                    } => app.set_backdrop_fixed(true)
+                    Button(id: backdrop_next, label: tr! { "en" => "Switch", "zh-Hans" => "切换" }, enabled: app.detail_can_switch) {
+                        Row(padding_x: 10, padding_y: 8, align: center) {
+                            Text(content: tr! { "en" => "Switch", "zh-Hans" => "切换" })
+                            Spacer
+                        }
+                    } => app.next_backdrop()
+                }
+            }
+            if app.detail_loading {
+                Progress()
+            }
+        }
+    }
+}
+
+/// 剧集：正片 / 特别篇 / OP·ED 的筛选和左右翻页，下面一排剧照缩略图，打开时滚到“继续”那一集附近。
+#[component]
+pub fn detail_episodes(app: nkuplay::Client, #[session] draft: MainDraft) -> impl View {
+    ui! {
+        Column(gap: 14) {
+            // 引擎说滚到哪一集就滚到哪一集；用户自己滚时 `draft.strip` 跟着变。
+            Watch(value: app.detail_strip_serial) => draft.strip.set(app.detail_strip_at)
+            Row(gap: 6, align: center) {
+                if app.detail_group == DetailGroup::Main {
+                    Button(id: group_main_on, label: tr! { "en" => "Episodes {n}", "zh-Hans" => "正片 {n}"; n: app.detail_main_count }, variant: group_on) => app.show_group(DetailGroup::Main)
                 } else {
-                    Text(content: episode.title, lines: 1, emphasis: tertiary)
+                    Button(id: group_main, label: tr! { "en" => "Episodes {n}", "zh-Hans" => "正片 {n}"; n: app.detail_main_count }, variant: group, prominence: plain) => app.show_group(DetailGroup::Main)
+                }
+                if app.detail_special_count > 0 {
+                    if app.detail_group == DetailGroup::Special {
+                        Button(id: group_special_on, label: tr! { "en" => "Specials {n}", "zh-Hans" => "特别篇 {n}"; n: app.detail_special_count }, variant: group_on) => app.show_group(DetailGroup::Special)
+                    } else {
+                        Button(id: group_special, label: tr! { "en" => "Specials {n}", "zh-Hans" => "特别篇 {n}"; n: app.detail_special_count }, variant: group, prominence: plain) => app.show_group(DetailGroup::Special)
+                    }
+                }
+                if app.detail_extra_count > 0 {
+                    if app.detail_group == DetailGroup::Extra {
+                        Button(id: group_extra_on, label: tr! { "en" => "OP / ED {n}", "zh-Hans" => "OP / ED {n}"; n: app.detail_extra_count }, variant: group_on) => app.show_group(DetailGroup::Extra)
+                    } else {
+                        Button(id: group_extra, label: tr! { "en" => "OP / ED {n}", "zh-Hans" => "OP / ED {n}"; n: app.detail_extra_count }, variant: group, prominence: plain) => app.show_group(DetailGroup::Extra)
+                    }
                 }
                 Spacer
-                if !episode.local {
-                    Text(content: tr! { "en" => "Not found", "zh-Hans" => "未找到" }, style: caption, emphasis: tertiary)
-                } else {
-                    if episode.finished {
-                        Text(content: tr! { "en" => "Watched", "zh-Hans" => "已看完" }, style: caption, color: accent)
-                    } else {
-                        if episode.percent > 0 {
-                            Text(content: tr! { "en" => "{p}%", "zh-Hans" => "{p}%"; p: episode.percent }, style: caption, color: accent)
+                IconButton(id: strip_back, icon: "chevron.left", label: tr! { "en" => "Earlier", "zh-Hans" => "往前" }, height: 34, variant: round) => app.page_episodes(draft.strip, -1)
+                IconButton(id: strip_forward, icon: "chevron.right", label: tr! { "en" => "Later", "zh-Hans" => "往后" }, height: 34, variant: round) => app.page_episodes(draft.strip, 1)
+            }
+            ScrollView(axis: horizontal, position: draft.strip, snap: start, indicators: hidden) {
+                Row(gap: 22, align: top) {
+                    ForEach(items: app.detail_episodes, key: id) |episode| {
+                        if episode.local {
+                            Button(
+                                id: play_episode,
+                                label: tr! { "en" => "Play {title}", "zh-Hans" => "播放{title}"; title: episode.title }
+                            ) {
+                                episode_card(episode: episode)
+                            } => app.open_file(episode.source)
+                        } else {
+                            episode_card(episode: episode)
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 一集：缩略图（看完的带勾，“继续”那一集有黑框和进度，本地有的盖着播放图标，本地没有的变灰变淡），
+/// 下面是“第N话 · 标题”和状态。
+#[component]
+pub fn episode_card(episode: nkuplay::DetailEpisode) -> impl View {
+    ui! {
+        Column(gap: 6, width: 248) {
+            Stack(width: 248, height: 140) {
+                if episode.has_thumb {
+                    if episode.local {
+                        Image(source: episode.thumb, width: 248, height: 140, fit: cover, corner: 8)
+                    } else {
+                        // 变淡的图后面垫上页面底色，不透出背景。
+                        Canvas(width: 248, height: 140) {
+                            Shape(kind: rounded, corner: 8, fill: surface.canvas)
+                        }
+                        Image(source: episode.thumb, width: 248, height: 140, fit: cover, corner: 8, saturation: 0, opacity: 0.45)
+                    }
+                } else {
+                    Canvas(width: 248, height: 140) {
+                        Shape(kind: rounded, corner: 8, fill: fill.strong)
+                    }
+                }
+                if episode.current {
+                    Canvas(width: 248, height: 140) {
+                        Shape(kind: rounded, corner: 8, stroke: text.primary, stroke_width: 3)
                     }
                 }
                 if episode.finished {
-                    Svg(source: "nkuplay-ui/icons/check-on.svg", width: 16, height: 16)
+                    Column(padding: 8, width: 248, height: 140, align: trailing) {
+                        Label(title: episode.title, icon: "checkmark.circle.fill", display: icon, color: accent, font_size: 18)
+                        Spacer
+                    }
+                }
+                if episode.local && !episode.finished && !episode.current {
+                    Column(width: 248, height: 140, align: center) {
+                        Spacer
+                        Label(title: episode.title, icon: "play.fill", display: icon, font_size: 28)
+                        Spacer
+                    }
+                }
+                if episode.current && episode.percent > 0 && !episode.finished {
+                    Column(padding: 8, width: 248, height: 140) {
+                        Spacer
+                        Progress(value: episode.percent, total: 100)
+                    }
+                }
+            }
+            if episode.local {
+                if episode.code != "" {
+                    Text(content: tr! { "en" => "{code} · {title}", "zh-Hans" => "{code} · {title}"; code: episode.code, title: episode.title }, bold: true, lines: 1)
                 } else {
-                    Svg(source: "nkuplay-ui/icons/check-off.svg", width: 16, height: 16)
+                    if episode.number > 0 {
+                        Text(content: tr! { "en" => "Ep {n} · {title}", "zh-Hans" => "第{n}话 · {title}"; n: episode.number, title: episode.title }, bold: true, lines: 1)
+                    } else {
+                        Text(content: episode.title, bold: true, lines: 1)
+                    }
+                }
+            } else {
+                // 本地没有的，标题也变灰。
+                if episode.code != "" {
+                    Text(content: tr! { "en" => "{code} · {title}", "zh-Hans" => "{code} · {title}"; code: episode.code, title: episode.title }, emphasis: tertiary, lines: 1)
+                } else {
+                    if episode.number > 0 {
+                        Text(content: tr! { "en" => "Ep {n} · {title}", "zh-Hans" => "第{n}话 · {title}"; n: episode.number, title: episode.title }, emphasis: tertiary, lines: 1)
+                    } else {
+                        Text(content: episode.title, emphasis: tertiary, lines: 1)
+                    }
+                }
+            }
+            if !episode.local {
+                Text(content: tr! { "en" => "Not found", "zh-Hans" => "未找到" }, style: caption, emphasis: tertiary)
+            } else {
+                if episode.finished {
+                    Text(content: tr! { "en" => "Watched", "zh-Hans" => "已看完" }, style: caption, emphasis: secondary)
+                } else {
+                    if episode.percent > 0 {
+                        Text(content: tr! { "en" => "{p}% watched", "zh-Hans" => "看到 {p}%"; p: episode.percent }, style: caption, color: accent)
+                    } else {
+                        Text(content: tr! { "en" => "On disk", "zh-Hans" => "本地有" }, style: caption, emphasis: secondary)
+                    }
                 }
             }
         }
@@ -805,7 +861,7 @@ pub fn detail_bottom(app: nkuplay::Client) -> impl View {
         Row(gap: 48, align: top) {
             Column(gap: 12) {
                 Row(gap: 8, align: baseline) {
-                    Text(content: tr! { "en" => "Reviews", "zh-Hans" => "评论" }, style: headline)
+                    Text(content: tr! { "en" => "Reviews", "zh-Hans" => "评论" }, style: headline, font_size: 16, bold: true)
                     if app.detail_comment_source != "" {
                         Text(
                             content: tr! {
@@ -856,23 +912,27 @@ pub fn detail_bottom(app: nkuplay::Client) -> impl View {
                     ) => app.toggle_comments()
                 }
             }
-            Column(gap: 10, width: 440) {
-                Text(content: tr! { "en" => "Ratings", "zh-Hans" => "各站评分" }, style: headline)
-                Flow(gap: 14) {
-                    ForEach(items: app.detail_scores, key: id) |score| {
-                        Text(
-                            content: tr! { "en" => "{site}: {score}", "zh-Hans" => "{site}：{score}"; site: score.site, score: score.score },
-                            style: caption,
-                            emphasis: secondary
-                        )
+            Column(gap: 26, width: 440) {
+                Column(gap: 12) {
+                    Text(content: tr! { "en" => "Ratings", "zh-Hans" => "各站评分" }, style: headline, font_size: 16, bold: true)
+                    Flow(gap: 14) {
+                        ForEach(items: app.detail_scores, key: id) |score| {
+                            Text(
+                                content: tr! { "en" => "{site}: {score}", "zh-Hans" => "{site}：{score}"; site: score.site, score: score.score },
+                                style: caption,
+                                emphasis: secondary
+                            )
+                        }
                     }
                 }
-                Text(content: tr! { "en" => "Credits", "zh-Hans" => "制作信息" }, style: headline)
-                Column(gap: 6) {
-                    ForEach(items: app.detail_facts, key: id) |fact| {
-                        Row(gap: 8, align: top) {
-                            Text(content: fact.key, style: caption, bold: true)
-                            Text(content: fact.value, style: caption, lines: 2)
+                Column(gap: 12) {
+                    Text(content: tr! { "en" => "Credits", "zh-Hans" => "制作信息" }, style: headline, font_size: 16, bold: true)
+                    Column(gap: 6) {
+                        ForEach(items: app.detail_facts, key: id) |fact| {
+                            Row(gap: 8, align: top) {
+                                Text(content: fact.key, style: caption, bold: true)
+                                Text(content: fact.value, style: caption, lines: 2)
+                            }
                         }
                     }
                 }
@@ -932,11 +992,33 @@ pub fn not_yet(page: Page) -> impl View {
 // 视频页的动画和底色。
 style! {
     transition {
-        // 详情页从稍小一点放大着淡入（海报同时从海报墙飞过去）。
+        // 详情页从稍小一点放大着淡入。
         page_in: pop(from: 0.97, smooth),
         // 顶栏从上方滑进、滑出，底栏从下方。
         bar_top: slide(top, 16, smooth),
         bar_bottom: slide(bottom, 16, smooth),
+    }
+    // 剧集分组：胶囊。选中的有底色，没选中的只有字。
+    Button.group_on {
+        background: color(light: "#1B1B1B", dark: "#F3F3F3"),
+        foreground: color(light: "#FFFFFF", dark: "#1B1B1B"),
+        corner: 16,
+    }
+    Button.group {
+        corner: 16,
+    }
+    // 圆钮：和 `height` 一半一样的圆角就是圆的。
+    IconButton.round {
+        background: color(light: "#FFFFFF", dark: "#3A3A3A"),
+        corner: 17,
+    }
+    IconButton.round_large {
+        background: color(light: "#FFFFFF", dark: "#3A3A3A"),
+        corner: 20,
+    }
+    // 盖在页面上的页用不透明的页面底色。
+    Stack.panel_ground {
+        background: color(light: "#F3F3F3", dark: "#202020"),
     }
     // 视频以外的地方（比例不同时的黑边）是纯黑，不露出窗口背景。
     Stack.player_black {

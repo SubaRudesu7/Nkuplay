@@ -15,11 +15,11 @@ use library::Library;
 use nkuplay_dandanplay::{Comment, CommentMode};
 use nkuplay_mpv::{DanmakuComment, DanmakuMode};
 use nkuplay_protocol::nkuplay::{
-    self, Backdrop, DanmakuStatus, DetailComment, DetailEpisode, DetailFact, DetailScore,
-    DetailTag, Folder, Recent, Series, ShinAnime, ShinStatus, State, Weekday,
+    self, Backdrop, DanmakuStatus, DetailComment, DetailEpisode, DetailFact, DetailGroup,
+    DetailScore, DetailTag, Folder, Recent, Series, ShinAnime, ShinStatus, State, Weekday,
 };
 use shin::Season;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -44,6 +44,8 @@ enum Arrival {
     Details(i64, Result<details::Info, String>),
     /// 一集的剧照（第一项是 [`stills_key`]）。
     Stills(String, Vec<PathBuf>),
+    /// 一集的缩略图（第一项是 [`stills_key`]，第二项是第几集）。
+    Thumb(String, u32, PathBuf),
     /// 视频（第一项）离开时的画面存好了。
     Shot(String, PathBuf),
 }
@@ -61,16 +63,20 @@ struct Detail {
     info: Option<details::Info>,
     loading: bool,
     error: String,
-    descending: bool,
-    /// 从哪张海报点进来的，见 `State::detail_hero`。
-    hero: String,
+    group: details::Group,
+    /// 剧集条该滚到哪一行（行号从 1 开始）。
+    strip_at: i64,
     /// 评论展开着。
     comments_expanded: bool,
     /// 背景的剧照，正在显示第 `still_at` 张。
     stills: Vec<PathBuf>,
     still_at: usize,
-    /// 剧照是为哪一集取的（[`stills_key`]）。
+    /// 背景剧照是为哪一集取的（[`stills_key`]）。
     stills_for: Option<String>,
+    /// 各集的缩略图，按集数。
+    thumbs: HashMap<u32, PathBuf>,
+    /// 已经在后台取缩略图了。
+    thumbs_wanted: bool,
 }
 
 /// 一集剧照的标识：TMDB 剧集编号、季和集。
@@ -88,14 +94,54 @@ fn url_hash(url: &str) -> u64 {
     })
 }
 
-/// 详情页背景最多几张剧照。
-const MAX_STILLS: usize = 6;
+/// 一集最多取几张背景剧照（TMDB 上一集通常六七张，全取）。
+const MAX_STILLS: usize = 20;
+/// 剧集条翻一屏是几集。
+const STRIP_PAGE: i64 = 4;
+
+/// 一共 `count` 集时，剧集条最多滚到第几集（从 0 数）在最前面：后面还看得到一屏。
+fn last_page(count: usize) -> usize {
+    count.saturating_sub(STRIP_PAGE as usize)
+}
+
+fn group_of(group: details::Group) -> DetailGroup {
+    match group {
+        details::Group::Main => DetailGroup::Main,
+        details::Group::Special => DetailGroup::Special,
+        details::Group::Extra => DetailGroup::Extra,
+    }
+}
+
 /// 刚打开视频后多久以内不记进度：播放器报的位置可能还是上一个视频的。
 const RECORD_AFTER: Duration = Duration::from_secs(3);
 /// 看过不到这么多（毫秒）的不续播，从头开始。
 const RESUME_FROM: i64 = 10_000;
 /// 续播时往回倒一点（毫秒），接上前面的情节。
 const RESUME_REWIND: i64 = 2_000;
+
+/// 取第 `episode` 集的背景剧照和各集的缩略图，取到一样交回一样。会阻塞。
+fn fetch_images(
+    stills: &tmdb::Stills,
+    found: &nkuplay_dandanplay::BangumiDetails,
+    episode: u32,
+    send: &dyn Fn(Arrival),
+) {
+    let Some((tv, season)) = details::tmdb(found).filter(|_| stills.available()) else {
+        return;
+    };
+    if let Ok(images) = stills.fetch(tv, season, episode, MAX_STILLS) {
+        send(Arrival::Stills(stills_key(tv, season, episode), images));
+    }
+    let numbers = found
+        .episodes
+        .iter()
+        .filter_map(|episode| episode.episode_number.parse::<u32>().ok());
+    for number in numbers {
+        if let Some(path) = stills.fetch_thumb(tv, season, number) {
+            send(Arrival::Thumb(stills_key(tv, season, number), number, path));
+        }
+    }
+}
 
 fn unix_now() -> u64 {
     SystemTime::now()
@@ -300,12 +346,13 @@ impl NkuplayEngine {
                 library_scanning: false,
                 detail_open: false,
                 detail_title: String::new(),
-                detail_other_titles: String::new(),
+                detail_native_title: String::new(),
                 detail_poster: no_source(),
                 detail_has_poster: false,
-                detail_hero: String::new(),
                 detail_backdrop: Vec::new(),
                 detail_rotates: false,
+                detail_fixed: false,
+                detail_can_switch: false,
                 detail_known: false,
                 detail_loading: false,
                 detail_error: String::new(),
@@ -318,17 +365,19 @@ impl NkuplayEngine {
                 detail_on_air: false,
                 detail_tags: Vec::new(),
                 detail_summary: String::new(),
+                detail_group: DetailGroup::Main,
                 detail_episodes: Vec::new(),
+                detail_strip_at: 0,
+                detail_strip_serial: 0,
                 detail_main_count: 0,
                 detail_special_count: 0,
-                detail_local_count: 0,
-                detail_has_last: false,
-                detail_last_code: String::new(),
-                detail_last_number: 0,
-                detail_descending: false,
+                detail_extra_count: 0,
+                detail_episode_count: 0,
+                detail_minutes: 0,
                 detail_can_resume: false,
                 detail_resume: no_source(),
                 detail_started: false,
+                detail_resume_fraction: 0.0,
                 detail_comments: Vec::new(),
                 detail_comments_more: false,
                 detail_comments_expanded: false,
@@ -535,7 +584,6 @@ impl NkuplayEngine {
                     poster,
                     has_poster,
                     episodes: item.episodes.len() as i64,
-                    hero: format!("shelf-{}", item.key),
                 }
             })
             .collect();
@@ -550,7 +598,6 @@ impl NkuplayEngine {
         key: String,
         anime_id: Option<i64>,
         (title, poster): (String, Option<String>),
-        hero: String,
     ) {
         let info = anime_id.and_then(|id| self.details_source.cached(id));
         let stale = info.as_ref().is_none_or(|info| !info.fresh(unix_now()));
@@ -562,21 +609,25 @@ impl NkuplayEngine {
             info,
             loading: false,
             error: String::new(),
-            descending: false,
-            hero,
+            group: details::Group::Main,
+            strip_at: 0,
             comments_expanded: false,
             stills: Vec::new(),
             still_at: 0,
             stills_for: None,
+            thumbs: HashMap::new(),
+            thumbs_wanted: false,
         });
+        self.read_thumbs();
+        self.reset_strip();
         if stale {
             self.download_details();
         }
-        self.want_stills(true);
+        self.want_images(true);
         self.publish_detail();
     }
 
-    /// 在后台向弹弹play 取详情页这部番的资料；有 TMDB 密钥时顺便取“继续”那一集的剧照。
+    /// 在后台向弹弹play 取详情页这部番的资料；有 TMDB 密钥时顺便取剧照和缩略图。
     fn download_details(&mut self) {
         if !self.details_source.available() {
             return;
@@ -597,25 +648,28 @@ impl NkuplayEngine {
         let stills = Arc::clone(&self.stills);
         self.in_background_many(move |send| {
             let info = source.download(anime_id, unix_now());
-            let target = info
-                .as_ref()
-                .ok()
-                .and_then(|info| info.details.as_ref())
-                .and_then(details::tmdb);
+            let found = info.as_ref().ok().and_then(|info| info.details.clone());
             send(Arrival::Details(anime_id, info));
-            if let Some((tv, season)) = target.filter(|_| stills.available())
-                && let Ok(found) = stills.fetch(tv, season, episode, MAX_STILLS)
-            {
-                send(Arrival::Stills(stills_key(tv, season, episode), found));
+            if let Some(found) = found {
+                fetch_images(&stills, &found, episode, send);
             }
         });
     }
 
-    /// 背景用哪一集的剧照：“继续”指向的那一集；它不是正片时用第 1 集。
+    /// 背景用哪一集的剧照：选中的那一集；它不是正片时用第 1 集。
     fn still_episode(&self) -> u32 {
         self.detail_rows()
-            .and_then(|(rows, summary)| rows.get(summary.next?)?.number)
+            .and_then(|(rows, summary)| {
+                rows[details::selected(&rows, &summary, self.playing_now())?].number
+            })
             .unwrap_or(1)
+    }
+
+    /// 正在播放的视频的地址；没在播放时为空。
+    fn playing_now(&self) -> Option<&str> {
+        self.state
+            .has_video
+            .then_some(self.state.source.url.as_str())
     }
 
     /// 详情页这部番的剧集列表和统计；没打开详情页时为空。
@@ -628,47 +682,120 @@ impl NkuplayEngine {
             .map_or(&[][..], |item| &item.episodes[..]);
         let info = detail.info.as_ref().and_then(|info| info.details.as_ref());
         let rows = details::rows(info, local, &self.library.progress);
-        let summary = details::summarize(&rows, info.map_or(0, |info| info.episodes.len()));
+        let summary = details::summarize(&rows);
         Some((rows, summary))
     }
 
-    /// 背景该显示的那一集剧照的标识；没有 TMDB 密钥、没打开详情页或作品不在 TMDB 上时为空。
-    fn wanted_stills(&self) -> Option<(String, i64, u32, u32)> {
+    /// 剧集条滚到“继续”那一集附近（它前面露出两集）；没有时从头开始。
+    fn reset_strip(&mut self) {
+        let Some((rows, summary)) = self.detail_rows() else {
+            return;
+        };
+        let Some(detail) = self.detail.as_mut() else {
+            return;
+        };
+        let shown: Vec<usize> = (0..rows.len())
+            .filter(|&at| rows[at].group == detail.group)
+            .collect();
+        let target = summary
+            .next
+            .and_then(|next| shown.iter().position(|&at| at == next))
+            .unwrap_or(0);
+        detail.strip_at = shown
+            .get(target.saturating_sub(2).min(last_page(shown.len())))
+            .map_or(0, |&at| at as i64 + 1);
+        self.state.detail_strip_at = detail.strip_at;
+        self.state.detail_strip_serial += 1;
+    }
+
+    /// 详情页这部番在 TMDB 上的编号和季；没有 TMDB 密钥、没打开详情页或作品不在 TMDB 上时为空。
+    fn detail_tmdb(&self) -> Option<(i64, u32)> {
         if !self.stills.available() {
             return None;
         }
         let detail = self.detail.as_ref()?;
-        let found = detail.info.as_ref()?.details.as_ref()?;
-        let (tv, season) = details::tmdb(found)?;
+        details::tmdb(detail.info.as_ref()?.details.as_ref()?)
+    }
+
+    /// 背景该显示的那一集剧照的标识。
+    fn wanted_stills(&self) -> Option<(String, i64, u32, u32)> {
+        let (tv, season) = self.detail_tmdb()?;
         let episode = self.still_episode();
         Some((stills_key(tv, season, episode), tv, season, episode))
     }
 
-    /// 背景的剧照换成“继续”那一集的：缓存里有就直接用；`fetch` 为真且缓存里没有时在后台取。
-    /// 后台取完要唤醒引擎，所以只在命令里取（[`bern::wake::waker`] 只在命令执行时拿得到）。
-    fn want_stills(&mut self, fetch: bool) {
+    /// 把缓存里已经有的缩略图读出来。
+    fn read_thumbs(&mut self) {
+        let Some((tv, season)) = self.detail_tmdb() else {
+            return;
+        };
+        let Some((rows, _)) = self.detail_rows() else {
+            return;
+        };
+        let found: HashMap<u32, PathBuf> = rows
+            .iter()
+            .filter_map(|row| row.number)
+            .filter_map(|number| Some((number, self.stills.cached_thumb(tv, season, number)?)))
+            .collect();
+        if let Some(detail) = self.detail.as_mut() {
+            detail.thumbs = found;
+        }
+    }
+
+    /// 背景的剧照换成选中那一集的：缓存里有的先用；`fetch` 为真时在后台把这一集缺的剧照和各集的
+    /// 缩略图取回来。后台取完要唤醒引擎，所以只在命令里取
+    /// （[`bern::wake::waker`] 只在命令执行时拿得到）。
+    fn want_images(&mut self, fetch: bool) {
         let Some((key, tv, season, episode)) = self.wanted_stills() else {
             return;
         };
         let Some(detail) = self.detail.as_mut() else {
             return;
         };
-        if detail.stills_for.as_deref() == Some(key.as_str()) {
+        if detail.stills_for.as_deref() != Some(key.as_str()) {
+            let cached = self.stills.cached(tv, season, episode);
+            if !cached.is_empty() {
+                detail.stills = cached;
+                detail.still_at = 0;
+            }
+        } else if detail.thumbs_wanted {
             return;
         }
-        let cached = self.stills.cached(tv, season, episode);
-        if !cached.is_empty() {
-            detail.stills_for = Some(key);
-            detail.stills = cached;
-            detail.still_at = 0;
-        } else if fetch {
-            detail.stills_for = Some(key.clone());
-            let stills = Arc::clone(&self.stills);
-            self.in_background(move || {
-                let found = stills.fetch(tv, season, episode, MAX_STILLS);
-                Arrival::Stills(key, found.unwrap_or_default())
-            });
+        if !fetch {
+            return;
         }
+        detail.stills_for = Some(key);
+        detail.thumbs_wanted = true;
+        let Some(found) = detail.info.as_ref().and_then(|info| info.details.clone()) else {
+            return;
+        };
+        let stills = Arc::clone(&self.stills);
+        self.in_background_many(move |send| fetch_images(&stills, &found, episode, send));
+    }
+
+    /// 这部番的背景设置。
+    fn backdrop_choice(&self) -> library::BackdropChoice {
+        self.detail
+            .as_ref()
+            .and_then(|detail| self.library.backdrops.get(&detail.key))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// 背景显示哪一张剧照：固定的那一张，没固定时是轮到的那一张。
+    fn shown_still(&self) -> Option<PathBuf> {
+        let detail = self.detail.as_ref()?;
+        let choice = self.backdrop_choice();
+        let fixed = choice
+            .still
+            .filter(|_| choice.fixed)
+            .and_then(|name| self.stills.named(&name));
+        fixed.or_else(|| {
+            detail
+                .stills
+                .get(detail.still_at % detail.stills.len().max(1))
+                .cloned()
+        })
     }
 
     /// 把详情页放进界面状态；没打开时清空。
@@ -677,6 +804,8 @@ impl NkuplayEngine {
             self.close_detail_state();
             return;
         };
+        let choice = self.backdrop_choice();
+        let still = self.shown_still();
         let Some(detail) = self.detail.as_ref() else {
             return;
         };
@@ -693,11 +822,10 @@ impl NkuplayEngine {
             .filter(|url| !url.is_empty())
             .or_else(|| detail.poster.clone());
         (state.detail_poster, state.detail_has_poster) = poster(poster_url.as_deref());
-        state.detail_hero = detail.hero.clone();
         state.detail_known = found.is_some();
         state.detail_loading = detail.loading;
         state.detail_error = detail.error.clone();
-        state.detail_other_titles = found.map(details::other_titles).unwrap_or_default();
+        state.detail_native_title = found.map(details::native_title).unwrap_or_default();
         state.detail_rating = found.map_or(0.0, |found| found.rating.clamp(0.0, 10.0));
         state.detail_rating_text = details::score(state.detail_rating);
         state.detail_kind = found
@@ -711,7 +839,7 @@ impl NkuplayEngine {
         state.detail_month = premiere.map_or(0, |(_, month)| i64::from(month));
         state.detail_on_air = found.is_some_and(|found| found.is_on_air);
         state.detail_tags = found
-            .map(|found| details::tags(found, 6))
+            .map(|found| details::tags(found, 4))
             .unwrap_or_default()
             .into_iter()
             .enumerate()
@@ -724,38 +852,42 @@ impl NkuplayEngine {
 
         state.detail_main_count = summary.main as i64;
         state.detail_special_count = summary.special as i64;
-        state.detail_local_count = summary.local as i64;
-        let last = summary.last.map(|at| &rows[at]);
-        state.detail_has_last = last.is_some();
-        state.detail_last_code = last.map(|row| row.code.clone()).unwrap_or_default();
-        state.detail_last_number = last.and_then(|row| row.number).map_or(0, i64::from);
-        let resume = summary.next.and_then(|at| rows[at].url.clone());
+        state.detail_extra_count = summary.extra as i64;
+        state.detail_episode_count = found.map_or(0, |found| details::episode_count(found) as i64);
+        state.detail_minutes = details::minutes(&rows).unwrap_or(0);
+        let next = summary.next.map(|at| &rows[at]);
+        let resume = next.and_then(|row| row.url.clone());
         state.detail_can_resume = resume.is_some();
         state.detail_resume = resume.map_or_else(no_source, MediaSource::new);
         state.detail_started = summary.last.is_some();
-        state.detail_descending = detail.descending;
-        let mut episodes: Vec<DetailEpisode> = rows
+        state.detail_resume_fraction = next
+            .and_then(|row| row.watched)
+            .map_or(0.0, |watched| watched.percent() as f64 / 100.0);
+        state.detail_group = group_of(detail.group);
+        state.detail_episodes = rows
             .iter()
             .enumerate()
-            .map(|(at, row)| DetailEpisode {
-                id: at as i64 + 1,
-                code: row.code.clone(),
-                number: row.number.map_or(0, i64::from),
-                title: row.title.clone(),
-                local: row.url.is_some(),
-                source: row
-                    .url
-                    .as_ref()
-                    .map_or_else(no_source, |url| MediaSource::new(url.clone())),
-                percent: row.watched.map_or(0, |watched| watched.percent()),
-                finished: row.watched.is_some_and(|watched| watched.finished()),
-                current: summary.next == Some(at),
+            .filter(|(_, row)| row.group == detail.group)
+            .map(|(at, row)| {
+                let thumb = row.number.and_then(|number| detail.thumbs.get(&number));
+                DetailEpisode {
+                    id: at as i64 + 1,
+                    code: row.code.clone(),
+                    number: row.number.map_or(0, i64::from),
+                    title: row.title.clone(),
+                    local: row.url.is_some(),
+                    source: row
+                        .url
+                        .as_ref()
+                        .map_or_else(no_source, |url| MediaSource::new(url.clone())),
+                    percent: row.watched.map_or(0, |watched| watched.percent()),
+                    finished: row.watched.is_some_and(|watched| watched.finished()),
+                    current: summary.next == Some(at),
+                    thumb: thumb.map_or_else(no_source, MediaSource::file),
+                    has_thumb: thumb.is_some(),
+                }
             })
             .collect();
-        if detail.descending {
-            episodes.reverse();
-        }
-        state.detail_episodes = episodes;
 
         let comments = info.map(|info| &info.comments);
         let written: Vec<_> = comments
@@ -814,15 +946,14 @@ impl NkuplayEngine {
             })
             .collect();
 
-        // 背景：有剧照用剧照（清晰），没有用海报（虚化）。换了图编号才变，界面借此淡入淡出。
-        let still = detail
-            .stills
-            .get(detail.still_at % detail.stills.len().max(1));
+        // 背景：有剧照用剧照（清晰），没有用海报（虚化）。换了图编号才变，界面淡入淡出。
         let (url, is_still) = match still {
             Some(path) => (MediaSource::file(path).url, true),
             None => (poster_url.unwrap_or_default(), false),
         };
-        state.detail_rotates = detail.stills.len() > 1;
+        state.detail_fixed = choice.fixed;
+        state.detail_can_switch = detail.stills.len() > 1;
+        state.detail_rotates = !choice.fixed && detail.stills.len() > 1;
         if url.is_empty() {
             state.detail_backdrop.clear();
         } else {
@@ -842,11 +973,13 @@ impl NkuplayEngine {
         let state = &mut self.state;
         state.detail_open = false;
         state.detail_title.clear();
-        state.detail_other_titles.clear();
+        state.detail_native_title.clear();
         state.detail_poster = no_source();
         state.detail_has_poster = false;
         state.detail_backdrop.clear();
         state.detail_rotates = false;
+        state.detail_fixed = false;
+        state.detail_can_switch = false;
         state.detail_known = false;
         state.detail_loading = false;
         state.detail_error.clear();
@@ -907,6 +1040,8 @@ impl NkuplayEngine {
             {
                 recent.percent = percent;
             }
+            // 选中的那一集可能因此变了：背景跟着换。
+            self.want_images(true);
             self.publish_detail();
         }
     }
@@ -931,7 +1066,6 @@ impl NkuplayEngine {
                     title: anime.title.clone(),
                     poster,
                     has_poster,
-                    hero: format!("shin-{}", anime.id),
                 }
             })
             .collect();
@@ -1145,8 +1279,7 @@ impl nkuplay::Commands for NkuplayEngine {
             .strip_prefix("anime:")
             .and_then(|id| id.parse().ok());
         let (key, title, poster) = (item.key.clone(), item.title.clone(), item.poster.clone());
-        let hero = format!("shelf-{key}");
-        self.show_detail(key, anime_id, (title, poster), hero);
+        self.show_detail(key, anime_id, (title, poster));
         Ok(())
     }
 
@@ -1169,12 +1302,7 @@ impl nkuplay::Commands for NkuplayEngine {
                 let item = self.shelf.iter().find(|item| item.key == key)?;
                 Some((item.title.clone(), item.poster.clone()))
             });
-        self.show_detail(
-            key,
-            Some(anime_id),
-            known.unwrap_or_default(),
-            format!("shin-{anime_id}"),
-        );
+        self.show_detail(key, Some(anime_id), known.unwrap_or_default());
         Ok(())
     }
 
@@ -1190,9 +1318,56 @@ impl nkuplay::Commands for NkuplayEngine {
         Ok(())
     }
 
-    fn toggle_episode_order(&mut self) -> Result<(), CommandError> {
+    fn show_group(&mut self, group: DetailGroup) -> Result<(), CommandError> {
         if let Some(detail) = self.detail.as_mut() {
-            detail.descending = !detail.descending;
+            detail.group = match group {
+                DetailGroup::Main => details::Group::Main,
+                DetailGroup::Special => details::Group::Special,
+                DetailGroup::Extra => details::Group::Extra,
+            };
+        }
+        self.reset_strip();
+        self.publish_detail();
+        Ok(())
+    }
+
+    fn page_episodes(&mut self, at: i64, pages: i64) -> Result<(), CommandError> {
+        let ids: Vec<i64> = self.state.detail_episodes.iter().map(|e| e.id).collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let from = ids.iter().position(|id| *id == at).unwrap_or(0) as i64;
+        let to = from
+            .saturating_add(pages.saturating_mul(STRIP_PAGE))
+            .clamp(0, last_page(ids.len()) as i64);
+        self.state.detail_strip_at = ids[to as usize];
+        self.state.detail_strip_serial += 1;
+        if let Some(detail) = self.detail.as_mut() {
+            detail.strip_at = ids[to as usize];
+        }
+        Ok(())
+    }
+
+    fn mark_watched(&mut self) -> Result<(), CommandError> {
+        let url = self
+            .detail_rows()
+            .and_then(|(rows, summary)| rows[summary.next?].url.clone());
+        if let Some(url) = url {
+            self.library.finish(&url, unix_now());
+            self.want_images(true);
+            self.save_library();
+        }
+        Ok(())
+    }
+
+    fn set_backdrop_fixed(&mut self, fixed: bool) -> Result<(), CommandError> {
+        // 固定住的是现在看到的这一张。
+        let still = self.shown_still();
+        let name = still.and_then(|path| Some(path.file_name()?.to_str()?.to_string()));
+        if let Some(detail) = &self.detail {
+            let choice = library::BackdropChoice { fixed, still: name };
+            self.library.backdrops.insert(detail.key.clone(), choice);
+            self.store.save(&self.library);
         }
         self.publish_detail();
         Ok(())
@@ -1204,9 +1379,8 @@ impl nkuplay::Commands for NkuplayEngine {
         };
         self.library
             .forget(rows.iter().filter_map(|row| row.url.as_deref()));
-        self.store.save(&self.library);
-        self.want_stills(true);
-        self.publish_detail();
+        self.want_images(true);
+        self.save_library();
         Ok(())
     }
 
@@ -1219,10 +1393,26 @@ impl nkuplay::Commands for NkuplayEngine {
     }
 
     fn next_backdrop(&mut self) -> Result<(), CommandError> {
+        let shown = self.shown_still();
+        let fixed = self.backdrop_choice().fixed;
         if let Some(detail) = self.detail.as_mut()
             && !detail.stills.is_empty()
         {
-            detail.still_at = (detail.still_at + 1) % detail.stills.len();
+            // 从现在看到的这一张往后数；它不在这一集里（固定的是别的集）就从头开始。
+            let at = detail
+                .stills
+                .iter()
+                .position(|path| Some(path) == shown.as_ref());
+            detail.still_at = at.map_or(0, |at| (at + 1) % detail.stills.len());
+            if fixed {
+                let name = detail.stills[detail.still_at]
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string);
+                let choice = library::BackdropChoice { fixed, still: name };
+                self.library.backdrops.insert(detail.key.clone(), choice);
+                self.store.save(&self.library);
+            }
         }
         self.publish_detail();
         Ok(())
@@ -1313,13 +1503,24 @@ impl nkuplay::Engine for NkuplayEngine {
                         // 取不到时，之前的资料（如果有）照旧显示。
                         Err(reason) => detail.error = reason,
                     }
-                    // 这里拿不到唤醒器，只看缓存；缺的剧照由取资料的那件后台的事顺便取。
-                    self.want_stills(false);
+                    // 这里拿不到唤醒器，只看缓存；缺的图由取资料的那件后台的事顺便取。
+                    self.read_thumbs();
+                    self.want_images(false);
+                    self.reset_strip();
                     self.publish_detail();
                 }
                 Arrival::Shot(url, path) => {
                     self.library.shot(&url, path);
                     self.save_library();
+                }
+                Arrival::Thumb(key, episode, path) => {
+                    let wanted = self.detail_tmdb();
+                    if let (Some(detail), Some((tv, season))) = (self.detail.as_mut(), wanted)
+                        && key == stills_key(tv, season, episode)
+                    {
+                        detail.thumbs.insert(episode, path);
+                        self.publish_detail();
+                    }
                 }
                 Arrival::Stills(key, found) => {
                     let wanted = self.wanted_stills().map(|(wanted, ..)| wanted);
@@ -1327,9 +1528,13 @@ impl nkuplay::Engine for NkuplayEngine {
                         && wanted.as_deref() == Some(key.as_str())
                         && !found.is_empty()
                     {
+                        // 正在看的那一张还在，就接着看它。
+                        let shown = detail.stills.get(detail.still_at).cloned();
+                        detail.still_at = shown
+                            .and_then(|shown| found.iter().position(|path| *path == shown))
+                            .unwrap_or(0);
                         detail.stills_for = Some(key);
                         detail.stills = found;
-                        detail.still_at = 0;
                         self.publish_detail();
                     }
                 }
@@ -1719,7 +1924,6 @@ mod tests {
             .map(|e| (e.number, e.local))
             .collect();
         assert_eq!(episodes, [(10, true), (11, true)]);
-        assert_eq!(engine.state.detail_local_count, 2);
         assert!(engine.state.detail_can_resume);
         assert!(!engine.state.detail_started);
         let first = engine.state.detail_resume.clone();
@@ -1728,8 +1932,6 @@ mod tests {
         engine.open_file(first).unwrap();
         engine.close().unwrap();
         assert!(engine.state.detail_open);
-        engine.toggle_episode_order().unwrap();
-        assert_eq!(engine.state.detail_episodes[0].number, 11);
         engine.close_details().unwrap();
         assert!(!engine.state.detail_open);
         assert!(engine.state.detail_episodes.is_empty());
@@ -1752,14 +1954,19 @@ mod tests {
             (state.detail_year.as_str(), state.detail_month),
             ("2026", 7)
         );
-        assert_eq!(state.detail_tags.len(), 6);
+        assert_eq!(state.detail_tags.len(), 4);
         assert_eq!(
-            (state.detail_main_count, state.detail_special_count),
-            (3, 2)
+            (
+                state.detail_main_count,
+                state.detail_special_count,
+                state.detail_extra_count
+            ),
+            (3, 1, 1)
         );
-        assert_eq!(state.detail_local_count, 0);
         assert!(!state.detail_can_resume);
-        assert_eq!(state.detail_episodes[3].code, "S1");
+        assert_eq!(state.detail_episodes.len(), 3);
+        assert_eq!(state.detail_native_title, "さよならララ");
+        assert_eq!(state.detail_episode_count, 3);
         assert_eq!(state.detail_comments[0].score, 5);
         // 假弹弹play 只给一条评论，没有可展开的。
         assert!(!state.detail_comments_more);
@@ -1773,6 +1980,116 @@ mod tests {
         assert_eq!(state.detail_backdrop.len(), 1);
         assert!(!state.detail_backdrop[0].still);
         assert!(!state.detail_rotates);
+    }
+
+    #[test]
+    fn episodes_are_shown_one_group_at_a_time_and_the_strip_pages() {
+        let mut engine = engine_with_details(details::tests::FakeApi::lara());
+        engine.open_anime(18643).unwrap();
+        engine.wake();
+        let codes = |engine: &NkuplayEngine| -> Vec<String> {
+            let shown = engine.state.detail_episodes.iter();
+            shown.map(|e| e.code.clone()).collect()
+        };
+        assert_eq!(engine.state.detail_group, DetailGroup::Main);
+        engine.show_group(DetailGroup::Special).unwrap();
+        assert_eq!(codes(&engine), ["S1"]);
+        engine.show_group(DetailGroup::Extra).unwrap();
+        assert_eq!(codes(&engine), ["C1"]);
+        engine.show_group(DetailGroup::Main).unwrap();
+        assert_eq!(codes(&engine), ["", "", ""]);
+
+        // 翻页落在两头；每翻一次序号都变，界面才会滚。
+        let ids: Vec<i64> = engine.state.detail_episodes.iter().map(|e| e.id).collect();
+        let before = engine.state.detail_strip_serial;
+        engine.page_episodes(ids[0], 1).unwrap();
+        assert_eq!(engine.state.detail_strip_at, ids[0]);
+        engine.page_episodes(ids[2], -5).unwrap();
+        assert_eq!(engine.state.detail_strip_at, ids[0]);
+        // 最后一屏也露出一整屏。
+        assert_eq!((last_page(3), last_page(12)), (0, 8));
+        assert_eq!(engine.state.detail_strip_serial, before + 2);
+        // 关着的时候什么也不做。
+        engine.close_details().unwrap();
+        engine.page_episodes(1, 1).unwrap();
+    }
+
+    #[test]
+    fn marking_watched_moves_continue_to_the_next_episode() {
+        let anime = shows("shelf-mark");
+        let mut engine = engine(None, at_once);
+        engine.add_folder(MediaSource::file(&anime.0)).unwrap();
+        engine.wake();
+        engine.open_series(2).unwrap();
+        let second = engine.state.detail_episodes[1].source.clone();
+        engine.mark_watched().unwrap();
+        assert!(engine.state.detail_episodes[0].finished);
+        assert_eq!(engine.state.detail_resume, second);
+        engine.mark_watched().unwrap();
+        assert!(engine.state.detail_episodes[1].finished);
+    }
+
+    /// 详情来自假弹弹play、剧照来自假 TMDB 的引擎。
+    fn engine_with_stills(data: Option<PathBuf>, cache: PathBuf) -> NkuplayEngine {
+        NkuplayEngine::new(
+            None,
+            Sources {
+                details: details::Source::new(
+                    Some(Box::new(details::tests::FakeApi::lara())),
+                    Some(cache.join("bangumi")),
+                ),
+                stills: tmdb::Stills::new(
+                    Some(Box::new(tmdb::tests::FakeApi::with(&[
+                        "/a.jpg", "/b.jpg", "/c.jpg",
+                    ]))),
+                    Some(cache.join("stills")),
+                ),
+                ..no_sources()
+            },
+            library::Store::new(data),
+            today(),
+            at_once,
+        )
+    }
+
+    #[test]
+    fn the_backdrop_rotates_until_fixed_and_the_choice_is_remembered() {
+        let data = Scratch::named("backdrop-data");
+        let cache = Scratch::named("backdrop-cache");
+        let start = || engine_with_stills(Some(data.0.clone()), cache.0.clone());
+        let shown = |engine: &NkuplayEngine| engine.state.detail_backdrop[0].source.url.clone();
+
+        let mut engine = start();
+        engine.open_anime(18643).unwrap();
+        engine.wake();
+        assert!(engine.state.detail_rotates && !engine.state.detail_fixed);
+        assert!(engine.state.detail_can_switch);
+        assert!(engine.state.detail_backdrop[0].still);
+        assert!(shown(&engine).ends_with("a.jpg"));
+        // 每集的缩略图是它的第一张剧照，不跟着轮换。
+        assert!(engine.state.detail_episodes.iter().all(|e| e.has_thumb));
+        let thumb = engine.state.detail_episodes[0].thumb.clone();
+        engine.next_backdrop().unwrap();
+        assert!(shown(&engine).ends_with("b.jpg"));
+        assert_eq!(engine.state.detail_episodes[0].thumb, thumb);
+
+        // 固定住现在这一张；再切换就固定到下一张。
+        engine.set_backdrop_fixed(true).unwrap();
+        assert!(engine.state.detail_fixed && !engine.state.detail_rotates);
+        assert!(shown(&engine).ends_with("b.jpg"));
+        engine.next_backdrop().unwrap();
+        assert!(shown(&engine).ends_with("c.jpg"));
+
+        // 下次打开还是固定的那一张；别的番照旧轮换。
+        let mut engine = start();
+        engine.open_anime(18643).unwrap();
+        engine.wake();
+        assert!(engine.state.detail_fixed);
+        assert!(shown(&engine).ends_with("c.jpg"));
+        engine.set_backdrop_fixed(false).unwrap();
+        assert!(engine.state.detail_rotates);
+        engine.open_anime(1).unwrap();
+        assert!(!engine.state.detail_fixed);
     }
 
     #[test]
@@ -1838,8 +2155,8 @@ mod tests {
             (50, false, true)
         );
         assert!(engine.state.detail_started);
-        assert!(engine.state.detail_has_last);
-        assert_eq!(engine.state.detail_last_number, 10);
+        assert_eq!(engine.state.detail_resume_fraction, 0.5);
+        assert_eq!(engine.state.detail_minutes, 24);
         assert_eq!(engine.state.detail_resume, tenth);
         // 继续观看的卡片上也是 50%。
         assert_eq!(engine.state.recents[0].percent, 50);

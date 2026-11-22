@@ -1,5 +1,6 @@
 //! Nkuplay 的引擎：业务逻辑，纯 Rust。它不知道窗口的存在，所以不需要窗口就能测试。
 
+mod airtimes;
 mod danmaku;
 mod details;
 mod library;
@@ -51,6 +52,8 @@ enum Arrival {
     HomeStills,
     /// 视频（第一项）离开时的画面存好了。
     Shot(String, PathBuf),
+    /// 新番的播出时间。
+    Airtimes(airtimes::Table),
 }
 
 /// 打开着的详情页。
@@ -119,6 +122,13 @@ fn part_of(episode: &str) -> String {
         .next()
         .filter(|first| first.starts_with('第'))
         .unwrap_or_default()
+        .to_string()
+}
+
+/// 写成北京时间的几点几分。弹弹play 的星期按北京时间算，用别的时区会和星期对不上。
+fn beijing_time(at: chrono::DateTime<chrono::Utc>) -> String {
+    (at + chrono::Duration::hours(8))
+        .format("%H:%M")
         .to_string()
 }
 
@@ -220,6 +230,9 @@ pub struct NkuplayEngine {
     shin_source: Arc<shin::Source>,
     /// 当前的新番列表（缓存的或刚取到的）。
     season: Option<Season>,
+    /// 新番播出时间的来源，和现在有的播出时间。
+    airtimes_source: Arc<airtimes::Source>,
+    airtimes: airtimes::Table,
     /// 继续观看和媒体库，以及存放它们的地方。
     library: Library,
     store: library::Store,
@@ -318,6 +331,7 @@ impl Default for NkuplayEngine {
             Loader::built_in().map(Arc::new),
             Sources {
                 shin: shin::Source::built_in(),
+                airtimes: airtimes::Source::built_in(),
                 details: details::Source::built_in(),
                 stills: tmdb::Stills::built_in(),
                 shots: bern::storage::cache_dir().map(|dir| dir.join("shots")),
@@ -332,6 +346,7 @@ impl Default for NkuplayEngine {
 /// 弹弹play 和 TMDB 的几样资料从哪里来。
 struct Sources {
     shin: shin::Source,
+    airtimes: airtimes::Source,
     details: details::Source,
     stills: tmdb::Stills,
     /// 继续观看卡片上的画面存在哪个文件夹。
@@ -435,6 +450,8 @@ impl NkuplayEngine {
             comments: Arc::from([]),
             generation: 0,
             shin_source: Arc::new(sources.shin),
+            airtimes_source: Arc::new(sources.airtimes),
+            airtimes: airtimes::Table::default(),
             season: None,
             library,
             store,
@@ -702,9 +719,10 @@ impl NkuplayEngine {
         self.state.today_count = self.state.today.len() as i64;
     }
 
-    /// 新番列表里 `day` 那天更新的番。
+    /// 新番列表里 `day` 那天更新的番，按播出时间排，不知道时间的在后面。
     fn shin_on(&self, day: &Weekday) -> Vec<ShinAnime> {
-        self.season
+        let mut shown: Vec<ShinAnime> = self
+            .season
             .iter()
             .flat_map(|season| season.anime.iter())
             .filter(|anime| weekday(anime.day) == *day)
@@ -715,9 +733,16 @@ impl NkuplayEngine {
                     title: anime.title.clone(),
                     poster,
                     has_poster,
+                    time: self
+                        .airtimes
+                        .first_airing(&anime.title)
+                        .map(beijing_time)
+                        .unwrap_or_default(),
                 }
             })
-            .collect()
+            .collect();
+        shown.sort_by(|a, b| (a.time.is_empty(), &a.time).cmp(&(b.time.is_empty(), &b.time)));
+        shown
     }
 
     /// 把继续观看和媒体库放进界面状态。
@@ -1256,6 +1281,27 @@ impl NkuplayEngine {
         self.in_background(move || Arrival::Shin(source.download(&current)));
     }
 
+    /// 准备新番的播出时间：先用缓存的；没有或旧了，在后台重新取。
+    fn load_airtimes(&mut self) {
+        let cached = self.airtimes_source.cached();
+        let fresh = cached.as_ref().is_some_and(|table| table.fresh(unix_now()));
+        if let Some(table) = cached {
+            self.airtimes = table;
+            self.publish_shin();
+            self.publish_today();
+        }
+        if fresh || !self.airtimes_source.available() {
+            return;
+        }
+        let source = Arc::clone(&self.airtimes_source);
+        self.in_background_many(move |send| {
+            // 取不到就不显示时间，下次启动再试。
+            if let Ok(table) = source.download(unix_now()) {
+                send(Arrival::Airtimes(table));
+            }
+        });
+    }
+
     /// 在后台数文件夹 `url` 里的视频。
     /// 在后台扫描文件夹 `url`：先按文件名归出番剧交回来，再对还没认出的每部番请弹弹play
     /// 认一集（认不出就换下一集再试一次），认出一部交回一部。已经认出的沿用上次的结果。
@@ -1535,10 +1581,14 @@ impl nkuplay::Commands for NkuplayEngine {
     }
 
     fn load_home(&mut self) -> Result<(), CommandError> {
-        if self.home_loaded || !self.stills.available() {
+        if self.home_loaded {
             return Ok(());
         }
         self.home_loaded = true;
+        self.load_airtimes();
+        if !self.stills.available() {
+            return Ok(());
+        }
         // 详情已经在缓存里的番，取它最近看的那一集的一张剧照；不为此向弹弹play 发请求。
         let wanted: Vec<(i64, u32, u32)> = self
             .library
@@ -1721,6 +1771,11 @@ impl nkuplay::Engine for NkuplayEngine {
                     self.library.shot(&url, path);
                     self.save_library();
                 }
+                Arrival::Airtimes(table) => {
+                    self.airtimes = table;
+                    self.publish_shin();
+                    self.publish_today();
+                }
                 Arrival::Thumb(key, episode, path) => {
                     let wanted = self.detail_tmdb();
                     if let (Some(detail), Some((tv, season))) = (self.detail.as_mut(), wanted)
@@ -1790,6 +1845,7 @@ mod tests {
     fn no_sources() -> Sources {
         Sources {
             shin: shin::Source::new(None, None),
+            airtimes: airtimes::Source::new(None, None),
             details: details::Source::new(None, None),
             stills: tmdb::Stills::new(None, None),
             shots: None,
@@ -2494,10 +2550,34 @@ mod tests {
     }
 
     #[test]
-    fn the_season_is_named_and_the_chosen_day_is_marked() {
-        let mut engine = engine_with_shin(shin::tests::FakeApi::season(), None);
+    fn the_air_time_comes_with_the_home_page_and_orders_the_day() {
+        let mut list = shin::tests::FakeApi::season();
+        list.list
+            .insert(0, shin::tests::intro(5, "没有时间的番", 1));
+        let mut engine = NkuplayEngine::new(
+            None,
+            Sources {
+                shin: shin::Source::new(Some(Box::new(list)), None),
+                airtimes: airtimes::Source::new(
+                    Some(Box::new(airtimes::tests::FakeApi::default())),
+                    None,
+                ),
+                ..no_sources()
+            },
+            library::Store::new(None),
+            today(),
+            at_once,
+        );
         engine.load_shin().unwrap();
+        engine.load_home().unwrap();
         engine.wake();
+        let times: Vec<_> = engine
+            .state
+            .today
+            .iter()
+            .map(|anime| (anime.title.as_str(), anime.time.as_str()))
+            .collect();
+        assert_eq!(times, [("周一的番", "23:30"), ("没有时间的番", "")]);
         assert_eq!(engine.state.shin_year, "2026");
         assert_eq!(engine.state.shin_month, 10);
         let on: Vec<_> = engine.state.shin_days.iter().map(|day| day.on).collect();

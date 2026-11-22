@@ -262,7 +262,7 @@ pub fn home(app: nkuplay::Client, #[session] draft: MainDraft) -> impl View {
 pub fn home_scroll(app: nkuplay::Client, #[session] draft: MainDraft) -> impl View {
     ui! {
         ScrollView(position: draft.home_at, anchor: 0) {
-            // 第一次显示首页时准备新番列表和大图：有缓存读缓存，没有才去取。
+            // 第一次显示首页时准备新番列表、播出时间和大图：有缓存读缓存，没有才去取。
             Watch(value: app.shin) => app.load_shin()
             Watch(value: app.shin) => app.load_home()
             // 换到别的页再回来，从头开始。
@@ -533,7 +533,7 @@ pub fn recent_card(recent: nkuplay::Recent) -> impl View {
     }
 }
 
-/// 一张新番海报，下面是作品名。
+/// 一张新番海报：左上角是播出时间，下面是作品名。
 #[component]
 pub fn anime_card(anime: nkuplay::ShinAnime) -> impl View {
     ui! {
@@ -546,13 +546,29 @@ pub fn anime_card(anime: nkuplay::ShinAnime) -> impl View {
                         Shape(kind: rounded, corner: 7, fill: fill.strong)
                     }
                 }
+                if anime.time != "" {
+                    Column(padding: 6, width: 136, height: 192) {
+                        Row {
+                            Stack(appearance: dark, width: 40, height: 18) {
+                                Canvas {
+                                    Shape(kind: rounded, corner: 4, fill: surface.canvas, opacity: 0.8)
+                                }
+                                Row(padding_x: 6, padding_y: 1) {
+                                    Text(content: anime.time, font_size: 11)
+                                }
+                            }
+                            Spacer
+                        }
+                        Spacer
+                    }
+                }
             }
             Text(content: anime.title, font_size: 13, lines: 1)
         }
     }
 }
 
-/// 今天更新：本季新番里今天更新的，一排海报。
+/// 今天更新：本季新番里今天更新的，一排海报，按播出时间排。
 #[component]
 pub fn today_section(app: nkuplay::Client, #[session] draft: MainDraft) -> impl View {
     ui! {

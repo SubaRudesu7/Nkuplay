@@ -150,6 +150,9 @@ pub mod nkuplay {
         /// 海报地址；`has_poster` 为假时没有意义。
         pub poster: MediaSource,
         pub has_poster: bool,
+        /// 播出时间（北京时间，例如“22:30”）；不知道时为空。
+        #[content]
+        pub time: String,
     }
 
     /// 媒体库里的一个文件夹。

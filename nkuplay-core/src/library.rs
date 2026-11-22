@@ -40,6 +40,9 @@ pub struct RecentFile {
     /// 上次离开时的画面（缓存文件夹里的图片）。
     #[serde(default)]
     pub shot: Option<PathBuf>,
+    /// 那张画面几乎全黑；还没看过时为空。
+    #[serde(default)]
+    pub shot_black: Option<bool>,
     /// 弹弹play 的作品编号；没认出时为空。
     #[serde(default)]
     pub anime_id: Option<i64>,
@@ -180,6 +183,7 @@ impl Library {
             episode: String::new(),
             poster: None,
             shot: None,
+            shot_black: None,
             anime_id: None,
         });
         self.recents.insert(0, recent);
@@ -231,10 +235,12 @@ impl Library {
         }
     }
 
-    /// 记下 `url` 上次离开时的画面 `shot`，删掉之前的那张。不在继续观看里的不记，删掉这张图。
-    pub fn shot(&mut self, url: &str, shot: PathBuf) {
+    /// 记下 `url` 上次离开时的画面 `shot`（`black`：几乎全黑），删掉之前的那张。
+    /// 不在继续观看里的不记，删掉这张图。
+    pub fn shot(&mut self, url: &str, shot: PathBuf, black: bool) {
         match self.recents.iter_mut().find(|recent| recent.url == url) {
             Some(recent) => {
+                recent.shot_black = Some(black);
                 if let Some(old) = recent.shot.replace(shot.clone())
                     && old != shot
                 {
@@ -525,11 +531,12 @@ mod tests {
         let mut library = Library::default();
         library.opened("file:///a.mkv", "a.mkv");
         let (first, second, stray) = (file("1.jpg"), file("2.jpg"), file("3.jpg"));
-        library.shot("file:///a.mkv", first.clone());
-        library.shot("file:///a.mkv", second.clone());
+        library.shot("file:///a.mkv", first.clone(), true);
+        library.shot("file:///a.mkv", second.clone(), false);
         assert!(!first.exists());
         assert_eq!(library.recents[0].shot.as_ref(), Some(&second));
-        library.shot("file:///gone.mkv", stray.clone());
+        assert_eq!(library.recents[0].shot_black, Some(false));
+        library.shot("file:///gone.mkv", stray.clone(), false);
         assert!(!stray.exists());
         // 挤出继续观看的，画面一起删。
         for index in 0..MAX_RECENTS {

@@ -5,6 +5,7 @@ mod danmaku;
 mod details;
 mod library;
 mod naming;
+mod picture;
 mod shin;
 mod tmdb;
 
@@ -50,8 +51,10 @@ enum Arrival {
     Thumb(String, u32, PathBuf),
     /// 首页大图要的剧照下载好了。
     HomeStills,
-    /// 视频（第一项）离开时的画面存好了。
-    Shot(String, PathBuf),
+    /// 视频（第一项）离开时的画面存好了；第三项是它几乎全黑。
+    Shot(String, PathBuf, bool),
+    /// 以前存下的画面，各是不是几乎全黑。
+    ShotLooks(Vec<(PathBuf, bool)>),
     /// 新番的播出时间。
     Airtimes(airtimes::Table),
 }
@@ -617,9 +620,9 @@ impl NkuplayEngine {
                 // 大图：这一集的剧照，没有用离开时的画面，再没有用虚化的海报。
                 let still = self.hero_still(recent);
                 let picture = still.clone().or_else(|| shot.cloned());
-                // 卡片：离开时的画面，没有用这一集的剧照。
+                // 卡片：离开时的画面；没有，或者几乎全黑，用这一集的剧照。
                 let shot = match still {
-                    Some(still) if shot.is_none() => Some(still),
+                    Some(still) if shot.is_none() || recent.shot_black == Some(true) => Some(still),
                     _ => shot.cloned(),
                 };
                 let percent = self
@@ -1200,7 +1203,8 @@ impl NkuplayEngine {
         let url = url.clone();
         self.in_background_many(move |send| {
             if done.recv_timeout(Duration::from_secs(5)).unwrap_or(false) {
-                send(Arrival::Shot(url, path));
+                let black = picture::is_black(&path);
+                send(Arrival::Shot(url, path, black));
             }
         });
     }
@@ -1299,6 +1303,27 @@ impl NkuplayEngine {
             if let Ok(table) = source.download(unix_now()) {
                 send(Arrival::Airtimes(table));
             }
+        });
+    }
+
+    /// 在后台看以前存下的画面是不是几乎全黑（以前的版本没看）。
+    fn look_at_shots(&mut self) {
+        let unknown: Vec<PathBuf> = self
+            .library
+            .recents
+            .iter()
+            .filter(|recent| recent.shot_black.is_none())
+            .filter_map(|recent| recent.shot.clone())
+            .collect();
+        if unknown.is_empty() {
+            return;
+        }
+        self.in_background(move || {
+            let looks = unknown.into_iter().map(|path| {
+                let black = picture::is_black(&path);
+                (path, black)
+            });
+            Arrival::ShotLooks(looks.collect())
         });
     }
 
@@ -1586,6 +1611,7 @@ impl nkuplay::Commands for NkuplayEngine {
         }
         self.home_loaded = true;
         self.load_airtimes();
+        self.look_at_shots();
         if !self.stills.available() {
             return Ok(());
         }
@@ -1767,8 +1793,19 @@ impl nkuplay::Engine for NkuplayEngine {
                     self.reset_strip();
                     self.publish_detail();
                 }
-                Arrival::Shot(url, path) => {
-                    self.library.shot(&url, path);
+                Arrival::Shot(url, path, black) => {
+                    self.library.shot(&url, path, black);
+                    self.save_library();
+                }
+                Arrival::ShotLooks(looks) => {
+                    for recent in &mut self.library.recents {
+                        let look = looks
+                            .iter()
+                            .find(|(path, _)| Some(path) == recent.shot.as_ref());
+                        if let Some((_, black)) = look {
+                            recent.shot_black = Some(*black);
+                        }
+                    }
                     self.save_library();
                 }
                 Arrival::Airtimes(table) => {

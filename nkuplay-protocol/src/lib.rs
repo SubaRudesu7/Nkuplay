@@ -91,7 +91,7 @@ pub mod nkuplay {
         /// 作品的海报（弹弹play 认出后才有）；`has_poster` 为假时没有意义。
         pub poster: MediaSource,
         pub has_poster: bool,
-        /// 卡片上的画面：上次离开时的，没有时是这一集的剧照；`has_shot` 为假时没有意义。
+        /// 卡片上的画面：上次离开时的，全黑时换成这一集的剧照；`has_shot` 为假时没有意义。
         pub shot: MediaSource,
         pub has_shot: bool,
         /// 看了百分之几。

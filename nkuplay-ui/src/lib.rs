@@ -429,7 +429,7 @@ pub fn home_hero(app: nkuplay::Client) -> impl View {
     }
 }
 
-/// 继续播放：每部番一张卡片（最近看的那一集）：上次离开时的画面（没有时用剧照，再没有用海报），
+/// 继续播放：每部番一张卡片（最近看的那一集）：上次离开时的画面（没有或全黑时用剧照，再没有用海报），
 /// 底边是进度，下面是作品名和“看了百分之几 · 第几话”。点一下从离开的地方接着播放。
 #[component]
 pub fn continue_watching(app: nkuplay::Client, #[session] draft: MainDraft) -> impl View {

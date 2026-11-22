@@ -1,11 +1,11 @@
-//! Nkuplay 的界面：一个窗口，左边是导航，右边是所选的页面；点开一部番换成它的详情页，
-//! 打开视频后换成视频页。
+//! Nkuplay 的界面：一个窗口，顶上是导航（首页、媒体库、新番时间表、观看历史）和右侧的账号、设置；
+//! 点开一部番换成它的详情页，打开视频后换成视频页。
 //! 每段文字都在显示它的地方写出所有语言的版本，每个按钮都执行协议里的一条命令。
 
 use bern::prelude::*;
 use nkuplay_protocol::nkuplay::{self, DetailGroup, ShinStatus};
 
-/// 左侧导航能去的页面。
+/// 顶栏导航能去的页面。
 #[bern::value]
 pub enum Page {
     #[label(tr! { "en" => "Home", "zh-Hans" => "首页" })]
@@ -16,6 +16,16 @@ pub enum Page {
     Schedule,
     #[label(tr! { "en" => "History", "zh-Hans" => "观看历史" })]
     History,
+}
+
+/// 从顶栏右侧打开、盖在页面上的那一页。
+#[bern::value]
+pub enum Panel {
+    /// 没有打开。
+    #[label(tr! { "en" => "None", "zh-Hans" => "无" })]
+    None,
+    #[label(tr! { "en" => "Account", "zh-Hans" => "账号" })]
+    Account,
     #[label(tr! { "en" => "Settings", "zh-Hans" => "设置" })]
     Settings,
 }
@@ -35,8 +45,10 @@ pub struct MainDraft {
     pub file: MediaSource,
     /// 是否有视频正悬停在窗口上方。
     pub over: bool,
-    /// 左侧导航选中的页面。
+    /// 顶栏导航选中的页面。
     pub page: Page,
+    /// 顶栏右侧打开的账号或设置页。
+    pub panel: Panel,
     /// 详情页剧集条最前面的那一集。
     pub strip: i64,
     /// 最近一次选择的要加入媒体库的文件夹。
@@ -55,6 +67,8 @@ pub fn app(app: nkuplay::Client, windows: AppWindows, players: Players) -> impl 
                 height: 900,
                 min_width: 800,
                 min_height: 560,
+                // 顶栏和标题栏合成一条。
+                chrome: unified,
                 // 视频页隐藏标题栏；鼠标停住后连指针也隐藏。
                 immersive: app.has_video,
                 // 鼠标 3 秒不动，`window.idle` 变真，视频页的按钮随之隐藏。
@@ -66,9 +80,8 @@ pub fn app(app: nkuplay::Client, windows: AppWindows, players: Players) -> impl 
     }
 }
 
-/// 整个窗口都接受拖入的视频。最底下一直是导航加页面；点开一部番时详情页盖在上面，
-/// 打开视频时视频页盖在最上面。导航和页面从不拆掉，所以回来时导航栏还是原来的展开或收起、
-/// 原来选中的那一项，页面也停在原来滚到的地方。
+/// 整个窗口都接受拖入的视频。最底下是所选的页面；账号、设置和番剧详情页盖在上面，
+/// 打开视频时视频页盖在最上面。
 #[component]
 pub fn main_window(
     app: nkuplay::Client,
@@ -85,25 +98,60 @@ pub fn main_window(
             over: draft.over
         ) {
             Stack {
-                SplitView {
-                    Sidebar(selection: draft.page, width: 280) {
-                        SidebarItem(value: Page::Home, label: tr! { "en" => "Home", "zh-Hans" => "首页" }, icon: "house")
-                        SidebarItem(value: Page::Library, label: tr! { "en" => "Library", "zh-Hans" => "媒体库" }, icon: "folder")
-                        SidebarItem(value: Page::Schedule, label: tr! { "en" => "Schedule", "zh-Hans" => "新番时间表" }, icon: "calendar")
-                        SidebarItem(value: Page::History, label: tr! { "en" => "History", "zh-Hans" => "观看历史" }, icon: "clock.arrow.circlepath")
-                        SidebarItem(value: Page::Settings, label: tr! { "en" => "Settings", "zh-Hans" => "设置" }, icon: "gearshape")
-                    }
-                    Detail(titled: false) {
-                        match draft.page {
-                            Page::Home => { home(app: app) }
-                            Page::Library => { library_page(app: app) }
-                            Page::Schedule => { not_yet(page: Page::Schedule) }
-                            Page::History => { not_yet(page: Page::History) }
-                            Page::Settings => { not_yet(page: Page::Settings) }
+                match draft.page {
+                    Page::Home => { home(app: app) }
+                    Page::Library => { library_page(app: app) }
+                    Page::Schedule => { not_yet(page: Page::Schedule) }
+                    Page::History => { not_yet(page: Page::History) }
+                }
+                // 顶栏和标题栏合成一条（窗口的 `chrome: unified`）：左边导航，右边账号，设置在它右边。
+                // 账号、设置和详情页盖满窗口，那时顶栏不挂。
+                if !app.detail_open && draft.panel == Panel::None {
+                    Toolbar {
+                        // 开头的文字就是窗口的名字，标题栏不再另外显示图标和名字。
+                        Text(content: tr! { "en" => "Nkuplay", "zh-Hans" => "Nkuplay" }, font_size: 19, bold: true)
+                        if draft.page == Page::Home {
+                            Button(id: nav_home_on, label: tr! { "en" => "Home", "zh-Hans" => "首页" }, variant: nav_on) => draft.page.set(Page::Home)
+                        } else {
+                            Button(id: nav_home, label: tr! { "en" => "Home", "zh-Hans" => "首页" }, variant: nav, prominence: plain) => draft.page.set(Page::Home)
                         }
+                        if draft.page == Page::Library {
+                            Button(id: nav_library_on, label: tr! { "en" => "Library", "zh-Hans" => "媒体库" }, variant: nav_on) => draft.page.set(Page::Library)
+                        } else {
+                            Button(id: nav_library, label: tr! { "en" => "Library", "zh-Hans" => "媒体库" }, variant: nav, prominence: plain) => draft.page.set(Page::Library)
+                        }
+                        if draft.page == Page::Schedule {
+                            Button(id: nav_schedule_on, label: tr! { "en" => "Schedule", "zh-Hans" => "新番时间表" }, variant: nav_on) => draft.page.set(Page::Schedule)
+                        } else {
+                            Button(id: nav_schedule, label: tr! { "en" => "Schedule", "zh-Hans" => "新番时间表" }, variant: nav, prominence: plain) => draft.page.set(Page::Schedule)
+                        }
+                        if draft.page == Page::History {
+                            Button(id: nav_history_on, label: tr! { "en" => "History", "zh-Hans" => "观看历史" }, variant: nav_on) => draft.page.set(Page::History)
+                        } else {
+                            Button(id: nav_history, label: tr! { "en" => "History", "zh-Hans" => "观看历史" }, variant: nav, prominence: plain) => draft.page.set(Page::History)
+                        }
+                        Spacer
+                        Button(
+                            id: open_account,
+                            label: tr! { "en" => "Sign In", "zh-Hans" => "登录" },
+                            icon: "person.crop.circle",
+                            variant: nav_on
+                        ) => draft.panel.set(Panel::Account)
+                        IconButton(
+                            id: open_settings,
+                            icon: "gearshape",
+                            label: tr! { "en" => "Settings", "zh-Hans" => "设置" },
+                            height: 34,
+                            variant: nav_round
+                        ) => draft.panel.set(Panel::Settings)
                     }
                 }
-                // 点海报墙或本季新番里的一部番：详情页盖满窗口，导航藏在下面。
+                match draft.panel {
+                    Panel::None => {}
+                    Panel::Account => { panel_page(panel: Panel::Account) }
+                    Panel::Settings => { panel_page(panel: Panel::Settings) }
+                }
+                // 点海报墙或新番里的一部番：详情页盖满窗口。
                 if app.detail_open {
                     details_page(app: app)
                 }
@@ -123,6 +171,32 @@ pub fn main_window(
                 }
             }
         } => app.open_file(draft.file)
+    }
+}
+
+/// 账号页和设置页（还没做）：盖满窗口，左上角返回。
+#[component]
+pub fn panel_page(panel: Panel, #[session] draft: MainDraft) -> impl View {
+    ui! {
+        Stack(under_bars: true, variant: panel_ground) {
+            Column(gap: 12, padding_x: 56, padding_y: 48) {
+                Row {
+                    Button(
+                        id: close_panel,
+                        label: tr! { "en" => "Back", "zh-Hans" => "返回" },
+                        icon: "arrow.left"
+                    ) => draft.panel.set(Panel::None)
+                    Spacer
+                }
+                Text(content: panel, style: large_title)
+                Text(
+                    content: tr! { "en" => "This page isn't ready yet.", "zh-Hans" => "这一页还没做。" },
+                    emphasis: secondary
+                )
+                Spacer
+            }
+            Shortcut(key: "escape") => draft.panel.set(Panel::None)
+        }
     }
 }
 
@@ -998,7 +1072,20 @@ style! {
         bar_top: slide(top, 16, smooth),
         bar_bottom: slide(bottom, 16, smooth),
     }
-    // 剧集分组：胶囊。选中的有底色，没选中的只有字。
+    // 顶栏导航、登录和剧集分组：胶囊。选中的有底色，没选中的只有字。
+    Button.nav_on {
+        background: color(light: "#FFFFFF", dark: "#F3F3F3"),
+        foreground: color(light: "#1B1B1B", dark: "#1B1B1B"),
+        corner: 16,
+    }
+    Button.nav {
+        corner: 16,
+    }
+    // 顶栏的设置：浅色页面上是白圆，大图上是灰圆。
+    IconButton.nav_round {
+        background: color(light: "#FFFFFF", dark: "#5C5C5C"),
+        corner: 17,
+    }
     Button.group_on {
         background: color(light: "#1B1B1B", dark: "#F3F3F3"),
         foreground: color(light: "#FFFFFF", dark: "#1B1B1B"),
@@ -1016,7 +1103,7 @@ style! {
         background: color(light: "#FFFFFF", dark: "#3A3A3A"),
         corner: 20,
     }
-    // 盖在页面上的页用不透明的页面底色。
+    // 账号页、设置页盖在页面上，用不透明的页面底色。
     Stack.panel_ground {
         background: color(light: "#F3F3F3", dark: "#202020"),
     }

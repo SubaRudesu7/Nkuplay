@@ -4,8 +4,7 @@
 //! 只在开始播放视频时调用。两样结果分开缓存，都记在内存里，也存进缓存文件夹：
 //!
 //! - 文件是哪一集：不会变，一直保留（`match/<文件哈希>.json`）。
-//! - 那一集的弹幕：本季新番的保留 [`AIRING_KEEP`]，其余的保留 [`OTHER_KEEP`]
-//!   （`comments/<剧集编号>.json`）。弹弹play 建议正在连载的热门番剧缓存时间短一些。
+//! - 那一集的弹幕：保留 [`KEEP`]（`comments/<剧集编号>.json`），所有作品一样（用户定的）。
 
 use bern::media::MediaSource;
 use nkuplay_dandanplay::{
@@ -13,24 +12,13 @@ use nkuplay_dandanplay::{
     MatchRequest, MatchResult, fingerprint_reader,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// 本季新番的弹幕保留多久。
-pub const AIRING_KEEP: Duration = Duration::from_secs(30 * 60);
-/// 其余作品的弹幕保留多久。
-pub const OTHER_KEEP: Duration = Duration::from_secs(3 * 24 * 60 * 60);
-
-/// 作品 `anime_id` 的弹幕保留多久；`airing` 是本季新番的作品编号。
-pub fn keep_for(anime_id: i64, airing: &HashSet<i64>) -> Duration {
-    if airing.contains(&anime_id) {
-        AIRING_KEEP
-    } else {
-        OTHER_KEEP
-    }
-}
+/// 一集的弹幕保留多久。
+pub const KEEP: Duration = Duration::from_secs(30 * 60);
 
 /// 弹弹play 的调用里引擎用到的那两个，测试时可以换成假的。
 pub trait Api: Send + Sync {
@@ -234,8 +222,7 @@ impl Loader {
     }
 
     /// 为 `source` 取弹幕。会阻塞：读文件的前 16 MiB，并发零到两次网络请求。
-    /// `airing` 是本季新番的作品编号，决定弹幕缓存保留多久。
-    pub fn load(&self, source: &MediaSource, airing: &HashSet<i64>) -> Outcome {
+    pub fn load(&self, source: &MediaSource) -> Outcome {
         let file = match source.open() {
             Ok(file) => file,
             Err(error) => return Outcome::Failed(error.message),
@@ -243,7 +230,7 @@ impl Loader {
         let size = file.len();
         let name = source.file_name().unwrap_or_default();
         match fingerprint_reader(&name, file, size) {
-            Ok(print) => self.load_fingerprint(print, airing),
+            Ok(print) => self.load_fingerprint(print),
             Err(error) => Outcome::Failed(error.to_string()),
         }
     }
@@ -268,14 +255,13 @@ impl Loader {
             }))
     }
 
-    pub fn load_fingerprint(&self, print: Fingerprint, airing: &HashSet<i64>) -> Outcome {
+    pub fn load_fingerprint(&self, print: Fingerprint) -> Outcome {
         let episode = match self.episode(print) {
             Ok(Some(episode)) => episode,
             Ok(None) => return Outcome::NoMatch,
             Err(reason) => return Outcome::Failed(reason),
         };
-        let keep = keep_for(episode.anime_id, airing);
-        let comments = match self.episode_comments(episode.episode_id, keep) {
+        let comments = match self.episode_comments(episode.episode_id, KEEP) {
             Ok(comments) => comments,
             Err(reason) => return Outcome::Failed(reason),
         };
@@ -444,10 +430,6 @@ pub(crate) mod tests {
         }
     }
 
-    fn none() -> HashSet<i64> {
-        HashSet::new()
-    }
-
     /// 系统临时文件夹里一个空的子文件夹，销毁时删除。
     struct Scratch(PathBuf);
 
@@ -478,7 +460,7 @@ pub(crate) mod tests {
     #[test]
     fn an_exact_match_gives_the_episode_and_its_comments() {
         let loader = Loader::new(FakeApi::recognising());
-        let Outcome::Loaded(loaded) = loader.load_fingerprint(print("aa"), &none()) else {
+        let Outcome::Loaded(loaded) = loader.load_fingerprint(print("aa")) else {
             panic!("should load");
         };
         assert_eq!(loaded.episode_id, 123450001);
@@ -496,10 +478,7 @@ pub(crate) mod tests {
         };
         let comment_calls = Arc::clone(&api.comment_calls);
         let loader = Loader::new(api);
-        assert_eq!(
-            loader.load_fingerprint(print("aa"), &none()),
-            Outcome::NoMatch
-        );
+        assert_eq!(loader.load_fingerprint(print("aa")), Outcome::NoMatch);
         assert_eq!(comment_calls.load(Ordering::SeqCst), 0);
     }
 
@@ -509,13 +488,13 @@ pub(crate) mod tests {
         let (match_calls, comment_calls) =
             (Arc::clone(&api.match_calls), Arc::clone(&api.comment_calls));
         let loader = Loader::new(api);
-        let first = loader.load_fingerprint(print("aa"), &none());
-        let second = loader.load_fingerprint(print("aa"), &none());
+        let first = loader.load_fingerprint(print("aa"));
+        let second = loader.load_fingerprint(print("aa"));
         assert_eq!(first, second);
         assert_eq!(match_calls.load(Ordering::SeqCst), 1);
         assert_eq!(comment_calls.load(Ordering::SeqCst), 1);
         // 另一个文件要另外识别；它是同一集的话，弹幕不再取。
-        loader.load_fingerprint(print("bb"), &none());
+        loader.load_fingerprint(print("bb"));
         assert_eq!(match_calls.load(Ordering::SeqCst), 2);
         assert_eq!(comment_calls.load(Ordering::SeqCst), 1);
     }
@@ -528,11 +507,11 @@ pub(crate) mod tests {
         };
         let match_calls = Arc::clone(&api.match_calls);
         let loader = Loader::new(api);
-        let Outcome::Failed(reason) = loader.load_fingerprint(print("aa"), &none()) else {
+        let Outcome::Failed(reason) = loader.load_fingerprint(print("aa")) else {
             panic!("should fail");
         };
         assert!(reason.contains("timed out"), "{reason}");
-        loader.load_fingerprint(print("aa"), &none());
+        loader.load_fingerprint(print("aa"));
         assert_eq!(match_calls.load(Ordering::SeqCst), 2);
 
         let loader = Loader::new(FakeApi {
@@ -540,7 +519,7 @@ pub(crate) mod tests {
             ..FakeApi::recognising()
         });
         assert!(matches!(
-            loader.load_fingerprint(print("aa"), &none()),
+            loader.load_fingerprint(print("aa")),
             Outcome::Failed(reason) if reason.contains("refused")
         ));
     }
@@ -549,7 +528,7 @@ pub(crate) mod tests {
     fn results_kept_on_disk_are_used_by_the_next_run_without_asking() {
         let folder = Scratch::named("disk");
         let first = Loader::with_folder(FakeApi::recognising(), Some(folder.0.clone()));
-        let Outcome::Loaded(loaded) = first.load_fingerprint(print("cc"), &none()) else {
+        let Outcome::Loaded(loaded) = first.load_fingerprint(print("cc")) else {
             panic!("should load");
         };
         assert!(folder.0.join("match").join("cc.json").exists());
@@ -560,40 +539,30 @@ pub(crate) mod tests {
         let (match_calls, comment_calls) =
             (Arc::clone(&api.match_calls), Arc::clone(&api.comment_calls));
         let next = Loader::with_folder(api, Some(folder.0.clone()));
-        assert_eq!(
-            next.load_fingerprint(print("cc"), &none()),
-            Outcome::Loaded(loaded)
-        );
+        assert_eq!(next.load_fingerprint(print("cc")), Outcome::Loaded(loaded));
         assert_eq!(match_calls.load(Ordering::SeqCst), 0);
         assert_eq!(comment_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
-    fn airing_danmaku_is_kept_half_an_hour_and_the_rest_three_days() {
-        let airing = HashSet::from([12345]);
-        assert_eq!(keep_for(12345, &airing), AIRING_KEEP);
-        assert_eq!(keep_for(999, &airing), OTHER_KEEP);
-
+    fn danmaku_is_kept_half_an_hour() {
         let folder = Scratch::named("keep");
         Loader::with_folder(FakeApi::recognising(), Some(folder.0.clone()))
-            .load_fingerprint(print("ee"), &none());
-        // 弹幕是 40 分钟前取的：本季新番要重新取，其余的还能用。
-        age_comments(&folder.0, 123450001, Duration::from_secs(40 * 60));
-        let comment_calls = |airing: &HashSet<i64>| {
+            .load_fingerprint(print("ee"));
+        let comment_calls = || {
             let api = FakeApi::recognising();
             let calls = Arc::clone(&api.comment_calls);
             let match_calls = Arc::clone(&api.match_calls);
-            Loader::with_folder(api, Some(folder.0.clone())).load_fingerprint(print("ee"), airing);
+            Loader::with_folder(api, Some(folder.0.clone())).load_fingerprint(print("ee"));
             // 是哪一集一直记着，不用再识别。
             assert_eq!(match_calls.load(Ordering::SeqCst), 0);
             calls.load(Ordering::SeqCst)
         };
-        assert_eq!(comment_calls(&none()), 0);
-        assert_eq!(comment_calls(&airing), 1);
-
-        // 超过三天：都要重新取。
-        age_comments(&folder.0, 123450001, OTHER_KEEP + Duration::from_secs(1));
-        assert_eq!(comment_calls(&none()), 1);
+        // 20 分钟前取的还能用，40 分钟前的要重新取。
+        age_comments(&folder.0, 123450001, Duration::from_secs(20 * 60));
+        assert_eq!(comment_calls(), 0);
+        age_comments(&folder.0, 123450001, Duration::from_secs(40 * 60));
+        assert_eq!(comment_calls(), 1);
     }
 
     #[test]
@@ -602,7 +571,7 @@ pub(crate) mod tests {
         let match_calls = Arc::clone(&api.match_calls);
         let loader = Loader::new(api);
         assert!(matches!(
-            loader.load(&MediaSource::file("no/such/file.mkv"), &none()),
+            loader.load(&MediaSource::file("no/such/file.mkv")),
             Outcome::Failed(_)
         ));
         assert_eq!(match_calls.load(Ordering::SeqCst), 0);

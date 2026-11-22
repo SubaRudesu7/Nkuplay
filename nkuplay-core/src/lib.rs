@@ -149,8 +149,6 @@ pub struct NkuplayEngine {
     shin_source: Arc<shin::Source>,
     /// 当前的新番列表（缓存的或刚取到的）。
     season: Option<Season>,
-    /// 新番列表里的作品编号；这些作品的弹幕缓存保留得短一些。
-    airing: Arc<HashSet<i64>>,
     /// 继续观看和媒体库，以及存放它们的地方。
     library: Library,
     store: library::Store,
@@ -344,7 +342,6 @@ impl NkuplayEngine {
             generation: 0,
             shin_source: Arc::new(sources.shin),
             season: None,
-            airing: Arc::default(),
             library,
             store,
             scanning: HashSet::new(),
@@ -420,8 +417,7 @@ impl NkuplayEngine {
         };
         self.reset_danmaku(DanmakuStatus::Matching);
         let generation = self.generation;
-        let airing = Arc::clone(&self.airing);
-        self.in_background(move || Arrival::Danmaku(generation, loader.load(&source, &airing)));
+        self.in_background(move || Arrival::Danmaku(generation, loader.load(&source)));
     }
 
     fn take_in(&mut self, outcome: Outcome) {
@@ -946,7 +942,6 @@ impl NkuplayEngine {
         self.state.shin = ShinStatus::Loaded;
         self.state.shin_outdated = season.id < self.today.season();
         self.state.shin_error.clear();
-        self.airing = Arc::new(season.anime.iter().map(|anime| anime.id).collect());
         self.season = Some(season);
         self.publish_shin();
     }

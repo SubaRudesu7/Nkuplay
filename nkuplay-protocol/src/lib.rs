@@ -77,7 +77,7 @@ pub mod nkuplay {
         Extra,
     }
 
-    /// 最近看过的一个视频。
+    /// 继续播放里的一部番（最近看的那一集），或没认出的一个视频。
     #[value]
     pub struct Recent {
         pub id: i64,
@@ -91,11 +91,53 @@ pub mod nkuplay {
         /// 作品的海报（弹弹play 认出后才有）；`has_poster` 为假时没有意义。
         pub poster: MediaSource,
         pub has_poster: bool,
-        /// 上次离开时的画面；`has_shot` 为假时没有意义。
+        /// 卡片上的画面：上次离开时的，没有时是这一集的剧照；`has_shot` 为假时没有意义。
         pub shot: MediaSource,
         pub has_shot: bool,
         /// 看了百分之几。
         pub percent: i64,
+        /// 卡片上的进度条画多长，0 到 1；刚开始看的也露出一点。
+        pub bar: f64,
+        /// 剧集名里的“第N话”；没有时为空。
+        #[content]
+        pub part: String,
+        /// 作品类别，例如“TV动画”；不知道时为空。
+        #[content]
+        pub kind: String,
+        /// 弹弹play 的作品编号，有详情页；没认出时为 0。
+        pub anime_id: i64,
+        /// 首页大图；`has_backdrop` 为假时没有意义。
+        pub backdrop: MediaSource,
+        pub has_backdrop: bool,
+        /// 大图是剧照或离开时的画面（清晰显示）；否则是海报（虚化显示）。
+        pub sharp: bool,
+    }
+
+    /// 首页大图下面的一个翻页点。
+    #[value]
+    pub struct HeroDot {
+        pub id: i64,
+        /// 正在显示这一张。
+        pub on: bool,
+    }
+
+    /// 首页上一个看不见的记号，用来知道滚到了哪里。
+    #[value]
+    pub struct HomeMark {
+        /// 从 100 起。滚动位置按各项的编号报告，所以和首页别的列表（大图、翻页点是 1 起，
+        /// 星期是 201 起）错开。
+        pub id: i64,
+        /// 到下一个记号有多高。
+        pub height: f64,
+    }
+
+    /// 本季新番上面的一个星期按钮。
+    #[value]
+    pub struct DayChip {
+        pub id: i64,
+        pub day: Weekday,
+        /// 正在看这一天。
+        pub on: bool,
     }
 
     /// 本季新番里的一部作品。
@@ -246,16 +288,34 @@ pub mod nkuplay {
         /// 想要的音量，0 到 1。界面看到它变化就交给播放器；换视频时保持不变。
         pub volume: f64,
 
-        /// 继续观看：最近打开过的视频，最近的在前。
+        /// 继续播放：每部番只留最近看的一集，最近的在前。
         pub recents: Vec<Recent>,
         /// `recents` 的个数。
         pub recent_count: i64,
+        /// 首页大图正在显示的那一部：没有或一个。
+        pub hero: Vec<Recent>,
+        /// 大图的翻页点，和 `recents` 一一对应。
+        pub hero_dots: Vec<HeroDot>,
+        /// 首页大图旁的记号：到了 102，大图就滚出去了。
+        pub home_marks: Vec<HomeMark>,
+
+        /// 今天更新的新番，和今天是星期几。
+        pub today: Vec<ShinAnime>,
+        pub today_count: i64,
+        pub today_day: Weekday,
+
         /// 本季新番列表的阶段。
         pub shin: ShinStatus,
         /// 缓存的新番列表是上一季或更早取的，应当刷新。
         pub shin_outdated: bool,
+        /// 列表是哪一年（文字，免得显示成 2,026）、从几月开始的那一季；没有列表时年份为空。
+        #[content]
+        pub shin_year: String,
+        pub shin_month: i64,
         /// 正在看哪一天更新的新番；默认是今天。
         pub shin_day: Weekday,
+        /// 周一到周日的按钮。
+        pub shin_days: Vec<DayChip>,
         /// `shin_day` 那天更新的新番。
         pub shin_shown: Vec<ShinAnime>,
         /// `shin_shown` 的个数。
@@ -435,6 +495,17 @@ pub mod nkuplay {
         /// 背景固定一张（`fixed` 为真），或轮换。每部番各记各的。
         #[idempotent]
         fn set_backdrop_fixed(&mut self, fixed: bool) -> Result<(), CommandError>;
+
+        /// 首页出现：为继续播放里的番准备大图。
+        #[idempotent]
+        fn load_home(&mut self) -> Result<(), CommandError>;
+
+        /// 首页大图换成继续播放里编号为 `id` 的那一部。
+        #[idempotent]
+        fn show_hero(&mut self, id: i64) -> Result<(), CommandError>;
+
+        /// 首页大图往后换 `step` 部，负数往前，到头了从另一头接着来。
+        fn step_hero(&mut self, step: i64) -> Result<(), CommandError>;
 
         /// 忘掉详情页这部番每一集看到哪里。
         fn clear_progress(&mut self) -> Result<(), CommandError>;

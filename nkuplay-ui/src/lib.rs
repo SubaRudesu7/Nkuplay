@@ -51,6 +51,9 @@ pub struct MainDraft {
     pub panel: Panel,
     /// 详情页剧集条最前面的那一集。
     pub strip: i64,
+    /// 首页滚到了哪一段（里面某一项的编号）：102 起是大图已经滚出去，
+    /// 顶栏换成不透明的。
+    pub home_at: i64,
     /// 最近一次选择的要加入媒体库的文件夹。
     pub folder: MediaSource,
 }
@@ -101,8 +104,8 @@ pub fn main_window(
                 match draft.page {
                     Page::Home => { home(app: app) }
                     Page::Library => { library_page(app: app) }
-                    Page::Schedule => { not_yet(page: Page::Schedule) }
-                    Page::History => { not_yet(page: Page::History) }
+                    Page::Schedule => { schedule_page(app: app) }
+                    Page::History => { history_page(app: app) }
                 }
                 // 顶栏和标题栏合成一条（窗口的 `chrome: unified`）：左边导航，右边账号，设置在它右边。
                 // 账号、设置和详情页盖满窗口，那时顶栏不挂。
@@ -200,236 +203,583 @@ pub fn panel_page(panel: Panel, #[session] draft: MainDraft) -> impl View {
     }
 }
 
-/// 首页：继续观看、本季新番、本地媒体库。
+/// 首页：大图（继续播放里的一部，可以翻），下面是继续播放、今天更新、本季新番和媒体库。
+/// 整页从窗口顶边开始，大图跟着一起滚；顶栏浮在上面。
 #[component]
 pub fn home(app: nkuplay::Client, #[session] draft: MainDraft) -> impl View {
     ui! {
-        ScrollView {
-            Column(gap: 28, padding_x: 56, padding_y: 28) {
-                // 第一次显示首页时准备新番列表：有缓存读缓存，没有才向弹弹play 取一次。
-                Watch(value: app.shin) => app.load_shin()
-                Row(gap: 8, align: center) {
-                    Text(content: tr! { "en" => "Home", "zh-Hans" => "首页" }, style: large_title)
-                    Spacer
-                    Button(
-                        id: open,
-                        label: tr! { "en" => "Open File", "zh-Hans" => "打开文件" },
-                        icon: "folder",
-                        prominence: prominent,
-                        pick: draft.file,
-                        files: "video"
-                    ) => app.open_file(draft.file)
+        Stack {
+            Stack(under_bars: true) {
+                Canvas {
+                    Shape(kind: rect, fill: surface.canvas)
                 }
-                continue_watching(app: app)
-                shin_section(app: app)
-                folders_section(app: app)
+                // 控件都在这个组件里：写在这一层上的话，Bern 会当成盖住窗口的页面，收起标题栏。
+                home_scroll(app: app)
+            }
+            // 顶栏后面垫的东西，两种叠着放：换的时候一个淡出、一个淡入，放在同一列里会上下排成两行。
+            Stack(under_bars: true) {
+                Column(gap: 0) {
+                    if app.recent_count > 0 && draft.home_at < 102 {
+                        // 压在大图上：一层暗色渐隐托住白字。
+                        Canvas(height: 60, appearance: dark, appear: fade, disappear: fade) {
+                            Shape(kind: rect, fill: surface.canvas, fade: down, opacity: 0.55)
+                        }
+                    }
+                    Spacer
+                }
+                Column(gap: 0) {
+                    if app.recent_count == 0 || draft.home_at >= 102 {
+                        // 大图滚出去了（或者没有）：页面底色，滚上来的内容不和导航叠在一起。
+                        // 下沿渐隐，盖在大图的尾巴上时没有一条硬边。
+                        Column(gap: 0, appear: fade, disappear: fade) {
+                            Canvas(height: 48) {
+                                Shape(kind: rect, fill: surface.canvas)
+                            }
+                            Canvas(height: 24) {
+                                Shape(kind: rect, fill: surface.canvas, fade: down)
+                            }
+                        }
+                    }
+                    Spacer
+                }
+            }
+            if app.recent_count > 0 && draft.home_at < 102 {
+                // 什么也不画，只让顶栏和窗口按钮用深色外观（白字）。
+                Stack(under_bars: true, appearance: dark) {
+                    Canvas(width: 1, height: 1) {
+                        Shape(kind: rect, fill: surface.canvas, opacity: 0)
+                    }
+                }
+            }
+            // 几部番慢慢轮换；点过箭头也接着从那一部往后换。
+            Timer(interval: 8, enabled: app.recent_count > 1) => app.step_hero(1)
+        }
+    }
+}
+
+/// 首页滚动的内容。
+#[component]
+pub fn home_scroll(app: nkuplay::Client, #[session] draft: MainDraft) -> impl View {
+    ui! {
+        ScrollView(position: draft.home_at, anchor: 0) {
+            // 第一次显示首页时准备新番列表和大图：有缓存读缓存，没有才去取。
+            Watch(value: app.shin) => app.load_shin()
+            Watch(value: app.shin) => app.load_home()
+            // 换到别的页再回来，从头开始。
+            Watch(value: draft.page) => draft.home_at.set(100)
+            Stack(align: top) {
+                if app.recent_count > 0 {
+                    home_picture(app: app)
+                }
+                // 看不见的记号，`draft.home_at` 靠它们知道滚到了哪里。
+                Column(gap: 0, width: 1) {
+                    ForEach(items: app.home_marks, key: id) |mark| {
+                        Canvas(width: 1, height: mark.height) {
+                            Shape(kind: rect, fill: surface.canvas, opacity: 0)
+                        }
+                    }
+                }
+                Column(gap: 0) {
+                    if app.recent_count > 0 {
+                        home_hero(app: app)
+                    }
+                    Column(gap: 28) {
+                        if app.recent_count == 0 {
+                            Canvas(height: 36) {
+                                Shape(kind: rect, fill: surface.canvas, opacity: 0)
+                            }
+                        }
+                        continue_watching(app: app)
+                        today_section(app: app)
+                        shin_section(app: app)
+                        library_section(app: app)
+                        Canvas(height: 28) {
+                            Shape(kind: rect, fill: surface.canvas, opacity: 0)
+                        }
+                    }
+                }
             }
         }
     }
 }
 
-/// 继续播放：最近打开过的视频，每个一张卡片：上次离开时的画面（没有时用海报），
-/// 下面是作品名和“看了百分之几 · 第几话”。点一下从离开的地方接着播放。
+/// 大图：左半边压暗托住白字，底下化进页面底色。
+#[component]
+pub fn home_picture(app: nkuplay::Client) -> impl View {
+    ui! {
+        Column(gap: 0) {
+            Stack(height: 520) {
+                // 没有图的视频，垫一层暗色，白字看得清。
+                Canvas(appearance: dark) {
+                    Shape(kind: rect, fill: fill.strong)
+                    Shape(kind: rect, fill: surface.canvas, opacity: 0.6)
+                }
+                ForEach(items: app.hero, key: id) |shown| {
+                    if shown.has_backdrop {
+                        if shown.sharp {
+                            Image(source: shown.backdrop, fit: cover, appear: fade, disappear: fade)
+                        } else {
+                            Image(source: shown.backdrop, fit: cover, blur: 40, appear: fade, disappear: fade)
+                        }
+                    }
+                }
+                Row(gap: 0) {
+                    Canvas(appearance: dark) {
+                        Shape(kind: rect, fill: surface.canvas, fade: right, opacity: 0.55)
+                    }
+                    Canvas {
+                        Shape(kind: rect, fill: surface.canvas, opacity: 0)
+                    }
+                }
+                Column(gap: 0) {
+                    Spacer
+                    Canvas(height: 208) {
+                        Shape(kind: rect, fill: surface.canvas, fade: up)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 大图上的字：正在显示的那部番、看到哪里、“继续”和“详情”；右下角是左右翻页。
+#[component]
+pub fn home_hero(app: nkuplay::Client) -> impl View {
+    ui! {
+        Column(height: 450, padding_x: 56, padding_y: 40, appearance: dark) {
+            Spacer
+            Row(gap: 24, align: bottom) {
+                ForEach(items: app.hero, key: id) |shown| {
+                    Column(gap: 8, width: 520) {
+                        Text(content: tr! { "en" => "Continue Watching", "zh-Hans" => "继续播放" }, style: caption)
+                        Text(content: shown.title, font_size: 44, bold: true, lines: 2)
+                        Row(gap: 6, align: center) {
+                            if shown.kind != "" {
+                                Stack {
+                                    Canvas {
+                                        Shape(kind: rounded, corner: 4, fill: text.primary, opacity: 0.2)
+                                    }
+                                    Row(padding_x: 8, padding_y: 1) {
+                                        Text(content: shown.kind, style: caption)
+                                    }
+                                }
+                            }
+                            if shown.episode != "" {
+                                Text(content: tr! {
+                                    "en" => "{episode} · {p}% watched",
+                                    "zh-Hans" => "你看到 {episode} · {p}%";
+                                    episode: shown.episode,
+                                    p: shown.percent
+                                }, lines: 1)
+                            } else {
+                                Text(content: tr! { "en" => "{p}% watched", "zh-Hans" => "看到 {p}%"; p: shown.percent })
+                            }
+                        }
+                        Canvas(height: 2) {
+                            Shape(kind: rect, fill: surface.canvas, opacity: 0)
+                        }
+                        Row(gap: 10, align: center) {
+                            if shown.part != "" {
+                                Button(
+                                    id: hero_play,
+                                    label: tr! { "en" => "Continue {part}", "zh-Hans" => "继续 {part}"; part: shown.part },
+                                    icon: "play.fill",
+                                    variant: hero_play
+                                ) => app.open_file(shown.source)
+                            } else {
+                                Button(
+                                    id: hero_play_file,
+                                    label: tr! { "en" => "Continue", "zh-Hans" => "继续" },
+                                    icon: "play.fill",
+                                    variant: hero_play
+                                ) => app.open_file(shown.source)
+                            }
+                            if shown.anime_id > 0 {
+                                Button(
+                                    id: hero_details,
+                                    label: tr! { "en" => "Details", "zh-Hans" => "详情" },
+                                    variant: hero_details
+                                ) => app.open_anime(shown.anime_id)
+                            }
+                        }
+                    }
+                }
+                Spacer
+                if app.recent_count > 1 {
+                    Row(gap: 14, align: center) {
+                        IconButton(id: hero_previous, icon: "chevron.left", label: tr! { "en" => "Previous", "zh-Hans" => "上一部" }, height: 34, variant: hero_arrow) => app.step_hero(-1)
+                        Row(gap: 6, align: center) {
+                            ForEach(items: app.hero_dots, key: id) |dot| {
+                                if dot.on {
+                                    Canvas(width: 22, height: 7) {
+                                        Shape(kind: capsule, fill: text.primary)
+                                    }
+                                } else {
+                                    Canvas(width: 7, height: 7) {
+                                        Shape(kind: capsule, fill: text.primary, opacity: 0.6)
+                                    }
+                                }
+                            }
+                        }
+                        IconButton(id: hero_next, icon: "chevron.right", label: tr! { "en" => "Next", "zh-Hans" => "下一部" }, height: 34, variant: hero_arrow) => app.step_hero(1)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 继续播放：每部番一张卡片（最近看的那一集）：上次离开时的画面（没有时用剧照，再没有用海报），
+/// 底边是进度，下面是作品名和“看了百分之几 · 第几话”。点一下从离开的地方接着播放。
 #[component]
 pub fn continue_watching(app: nkuplay::Client, #[session] draft: MainDraft) -> impl View {
     ui! {
         Column(gap: 12) {
-            Row(gap: 4, align: center) {
-                Text(content: tr! { "en" => "Continue Watching", "zh-Hans" => "继续播放" }, style: title2)
-                IconButton(
-                    id: refresh_recents,
-                    icon: "arrow.clockwise",
-                    label: tr! { "en" => "Refresh", "zh-Hans" => "刷新" },
-                    prominence: plain
-                ) => app.refresh_recents()
-                IconButton(
+            Row(gap: 10, align: center, padding_x: 56) {
+                Text(content: tr! { "en" => "Continue Watching", "zh-Hans" => "继续播放" }, style: title2, bold: true)
+                Spacer
+                Button(
                     id: open_history,
-                    icon: "clock.arrow.circlepath",
-                    label: tr! { "en" => "History", "zh-Hans" => "观看历史" },
+                    label: tr! { "en" => "History ›", "zh-Hans" => "观看历史 ›" },
+                    variant: link,
                     prominence: plain
                 ) => draft.page.set(Page::History)
             }
             if app.recent_count == 0 {
-                Text(
-                    content: tr! {
-                        "en" => "Videos you open show up here.",
-                        "zh-Hans" => "打开过的视频会出现在这里。"
-                    },
-                    emphasis: secondary
-                )
-            } else {
-                // 卡片一样大（画面 16:9），排不下换行。
-                Flow(gap: 20) {
-                    ForEach(items: app.recents, key: id) |recent| {
-                        Button(
-                            id: resume,
-                            label: tr! { "en" => "Play {title}", "zh-Hans" => "播放{title}"; title: recent.title }
-                        ) {
-                            Column(gap: 4, width: 280) {
-                                if recent.has_shot {
-                                    Image(source: recent.shot, width: 280, height: 158, fit: cover, corner: 6)
-                                } else {
-                                    if recent.has_poster {
-                                        Image(source: recent.poster, width: 280, height: 158, fit: cover, corner: 6)
-                                    } else {
-                                        Stack(width: 280, height: 158) {
-                                            Canvas(width: 280, height: 158) {
-                                                Shape(kind: rounded, corner: 6, fill: accent, opacity: 0.18)
-                                            }
-                                            Label(title: recent.title, icon: "play.fill", display: icon)
-                                        }
-                                    }
-                                }
-                                Text(content: recent.title, bold: true, lines: 1)
-                                if recent.episode != "" {
-                                    Text(
-                                        content: tr! {
-                                            "en" => "{p}% · {episode}",
-                                            "zh-Hans" => "{p}% · {episode}";
-                                            p: recent.percent,
-                                            episode: recent.episode
-                                        },
-                                        style: caption,
-                                        emphasis: secondary,
-                                        lines: 1
-                                    )
-                                } else {
-                                    Text(
-                                        content: tr! { "en" => "{p}%", "zh-Hans" => "{p}%"; p: recent.percent },
-                                        style: caption,
-                                        emphasis: secondary
-                                    )
-                                }
-                            }
-                        } => app.open_file(recent.source)
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// 本季新番：按星期筛选的海报墙。数据来自弹弹play，读缓存，点“刷新”才重新取。
-#[component]
-pub fn shin_section(app: nkuplay::Client) -> impl View {
-    ui! {
-        Column(gap: 12) {
-            Row(gap: 8, align: center) {
-                Text(content: tr! { "en" => "This Season", "zh-Hans" => "本季新番" }, style: title2)
-                Spacer
-                Button(
-                    id: refresh_shin,
-                    label: tr! { "en" => "Refresh", "zh-Hans" => "刷新" },
-                    icon: "arrow.clockwise",
-                    enabled: app.shin != ShinStatus::Loading
-                ) => app.refresh_shin()
-            }
-            Picker(
-                id: shin_day,
-                label: tr! { "en" => "Day", "zh-Hans" => "星期" },
-                selected: app.shin_day,
-                label_hidden: true,
-                style: segmented
-            ) => app.show_day(app.shin_day)
-            if app.shin_outdated {
-                Text(
-                    content: tr! {
-                        "en" => "This list is from an earlier season. Refresh to get the current one.",
-                        "zh-Hans" => "这是之前一季的列表，点刷新获取本季的。"
-                    },
-                    color: status.warning
-                )
-            }
-            if app.shin_error != "" {
-                Text(
-                    content: tr! { "en" => "Couldn't get the list: {reason}", "zh-Hans" => "没能取到新番列表：{reason}"; reason: app.shin_error },
-                    color: status.error
-                )
-            }
-            match app.shin {
-                ShinStatus::Loaded => {
-                    if app.shin_count == 0 {
-                        Text(
-                            content: tr! { "en" => "Nothing airs on this day.", "zh-Hans" => "这一天没有更新的新番。" },
-                            emphasis: secondary
-                        )
-                    } else {
-                        shin_grid(app: app, loading: false)
-                    }
-                }
-                ShinStatus::Loading => {
-                    shin_grid(app: app, loading: true)
-                }
-                ShinStatus::Unavailable => {
+                Row(padding_x: 56) {
                     Text(
                         content: tr! {
-                            "en" => "This build has no dandanplay credentials.",
-                            "zh-Hans" => "这个版本没有弹弹play 的凭证，取不到新番列表。"
+                            "en" => "Videos you open show up here. Drop one on the window to start.",
+                            "zh-Hans" => "打开过的视频会出现在这里。把视频拖到窗口上就能播放。"
                         },
                         emphasis: secondary
                     )
                 }
-                ShinStatus::Failed => {
-                    // 原因已经显示在上面了；这里只提示还能做什么。
+            } else {
+                // 横排从左边距开始，一直到窗口右边。
+                ScrollView(axis: horizontal, indicators: mouse) {
+                    Row(gap: 16, align: top, padding_x: 56) {
+                        ForEach(items: app.recents, key: id) |recent| {
+                            Button(
+                                id: resume,
+                                label: tr! { "en" => "Play {title}", "zh-Hans" => "播放{title}"; title: recent.title }
+                            ) {
+                                recent_card(recent: recent)
+                            } => app.open_file(recent.source)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 继续播放的一张卡片。
+#[component]
+pub fn recent_card(recent: nkuplay::Recent) -> impl View {
+    ui! {
+        Column(gap: 8, width: 260) {
+            Stack(width: 260, height: 146, variant: card_picture) {
+                if recent.has_shot {
+                    Image(source: recent.shot, width: 260, height: 146, fit: cover)
+                } else {
+                    if recent.has_poster {
+                        Image(source: recent.poster, width: 260, height: 146, fit: cover)
+                    } else {
+                        Canvas(width: 260, height: 146) {
+                            Shape(kind: rect, fill: accent, opacity: 0.18)
+                        }
+                        Label(title: recent.title, icon: "play.fill", display: icon)
+                    }
+                }
+                // 进度压在画面的底边上。
+                Column(gap: 0, width: 260, height: 146) {
+                    Spacer
+                    Stack(width: 260, height: 4) {
+                        Canvas(width: 260, height: 4, appearance: dark) {
+                            Shape(kind: rect, fill: surface.canvas, opacity: 0.35)
+                        }
+                        Rail {
+                            Canvas(from: 0, to: recent.bar) {
+                                Shape(kind: rect, fill: accent)
+                            }
+                        }
+                    }
+                }
+            }
+            Column(gap: 2) {
+                Text(content: recent.title, bold: true, lines: 1)
+                if recent.episode != "" {
                     Text(
-                        content: tr! { "en" => "Try Refresh again later.", "zh-Hans" => "稍后可以点刷新再试。" },
+                        content: tr! {
+                            "en" => "{p}% · {episode}",
+                            "zh-Hans" => "{p}% · {episode}";
+                            p: recent.percent,
+                            episode: recent.episode
+                        },
+                        style: caption,
+                        emphasis: secondary,
+                        lines: 1
+                    )
+                } else {
+                    Text(
+                        content: tr! { "en" => "{p}%", "zh-Hans" => "{p}%"; p: recent.percent },
+                        style: caption,
                         emphasis: secondary
                     )
                 }
-                ShinStatus::NotLoaded => {
-                    shin_grid(app: app, loading: true)
+            }
+        }
+    }
+}
+
+/// 一张新番海报，下面是作品名。
+#[component]
+pub fn anime_card(anime: nkuplay::ShinAnime) -> impl View {
+    ui! {
+        Column(gap: 8, width: 136) {
+            Stack(width: 136, height: 192) {
+                if anime.has_poster {
+                    Image(source: anime.poster, width: 136, height: 192, fit: cover, corner: 7)
+                } else {
+                    Canvas(width: 136, height: 192) {
+                        Shape(kind: rounded, corner: 7, fill: fill.strong)
+                    }
+                }
+            }
+            Text(content: anime.title, font_size: 13, lines: 1)
+        }
+    }
+}
+
+/// 今天更新：本季新番里今天更新的，一排海报。
+#[component]
+pub fn today_section(app: nkuplay::Client, #[session] draft: MainDraft) -> impl View {
+    ui! {
+        if app.today_count > 0 {
+            Column(gap: 12) {
+                Row(gap: 10, align: center, padding_x: 56) {
+                    Text(content: tr! { "en" => "New Today", "zh-Hans" => "今天更新" }, style: title2, bold: true)
+                    Text(
+                        content: tr! {
+                            "en" => "{day} · {count}",
+                            "zh-Hans" => "{day} · {count} 部";
+                            day: app.today_day,
+                            count: app.today_count
+                        },
+                        font_size: 13,
+                        emphasis: secondary
+                    )
+                    Spacer
+                    Button(
+                        id: open_schedule,
+                        label: tr! { "en" => "Schedule ›", "zh-Hans" => "新番时间表 ›" },
+                        variant: link,
+                        prominence: plain
+                    ) => draft.page.set(Page::Schedule)
+                }
+                ScrollView(axis: horizontal, indicators: mouse) {
+                    Row(gap: 16, align: top, padding_x: 56) {
+                        ForEach(items: app.today, key: id) |anime| {
+                            Button(
+                                id: open_today,
+                                label: tr! { "en" => "Open {title}", "zh-Hans" => "打开{title}"; title: anime.title }
+                            ) {
+                                anime_card(anime: anime)
+                            } => app.open_anime(anime.id)
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-/// 新番海报墙。`loading` 为真时（正在向弹弹play 取，或还没开始取）显示骨架图：
-/// Bern 在编译时按这块布局生成一排海报形状的占位，数据到了再淡入真内容。
+/// 本季新番：按星期筛选的一排海报。数据来自弹弹play，读缓存；重新取的按钮在新番时间表页，
+/// 这里只在列表过期或取失败时出现。
 #[component]
-pub fn shin_grid(app: nkuplay::Client, loading: bool) -> impl View {
+pub fn shin_section(app: nkuplay::Client) -> impl View {
     ui! {
-        Grid(min_width: 140, gap: 16, skeleton: loading, skeleton_count: 8) {
-            ForEach(items: app.shin_shown, key: id) |anime| {
-                Button(
-                    id: open_shin,
-                    label: tr! { "en" => "Open {title}", "zh-Hans" => "打开{title}"; title: anime.title }
-                ) {
-                    Column(gap: 6) {
-                        if anime.has_poster {
-                            Image(source: anime.poster, height: 187, fit: cover, corner: 6)
-                        }
-                        Text(content: anime.title, lines: 2)
+        Column(gap: 12) {
+            Row(gap: 10, align: center, padding_x: 56) {
+                Text(content: tr! { "en" => "This Season", "zh-Hans" => "本季新番" }, style: title2, bold: true)
+                if app.shin_year != "" {
+                    Text(
+                        content: tr! {
+                            "en" => "{year}/{month}",
+                            "zh-Hans" => "{year} 年 {month} 月";
+                            year: app.shin_year,
+                            month: app.shin_month
+                        },
+                        font_size: 13,
+                        emphasis: secondary
+                    )
+                }
+                Spacer
+                if app.shin_outdated || app.shin_error != "" {
+                    Button(
+                        id: refresh_shin,
+                        label: tr! { "en" => "Refresh", "zh-Hans" => "刷新" },
+                        icon: "arrow.clockwise",
+                        prominence: plain,
+                        enabled: app.shin != ShinStatus::Loading
+                    ) => app.refresh_shin()
+                }
+            }
+            Row(gap: 4, align: center, padding_x: 56) {
+                ForEach(items: app.shin_days, key: id) |chip| {
+                    if chip.on {
+                        Button(id: day_on, label: tr! { "en" => "{day}", "zh-Hans" => "{day}"; day: chip.day }, variant: day_on) => app.show_day(chip.day)
+                    } else {
+                        Button(id: day, label: tr! { "en" => "{day}", "zh-Hans" => "{day}"; day: chip.day }, variant: day) => app.show_day(chip.day)
                     }
-                } => app.open_anime(anime.id)
+                }
+            }
+            if app.shin_outdated {
+                Row(padding_x: 56) {
+                    Text(
+                        content: tr! {
+                            "en" => "This list is from an earlier season. Refresh to get the current one.",
+                            "zh-Hans" => "这是之前一季的列表，点刷新获取本季的。"
+                        },
+                        color: status.warning
+                    )
+                }
+            }
+            if app.shin_error != "" {
+                Row(padding_x: 56) {
+                    Text(
+                        content: tr! { "en" => "Couldn't get the list: {reason}", "zh-Hans" => "没能取到新番列表：{reason}"; reason: app.shin_error },
+                        color: status.error
+                    )
+                }
+            }
+            match app.shin {
+                ShinStatus::Loaded => {
+                    if app.shin_count == 0 {
+                        Row(padding_x: 56) {
+                            Text(
+                                content: tr! { "en" => "Nothing airs on this day.", "zh-Hans" => "这一天没有更新的新番。" },
+                                emphasis: secondary
+                            )
+                        }
+                    } else {
+                        shin_shelf(app: app, loading: false)
+                    }
+                }
+                ShinStatus::Loading => {
+                    shin_shelf(app: app, loading: true)
+                }
+                ShinStatus::Unavailable => {
+                    Row(padding_x: 56) {
+                        Text(
+                            content: tr! {
+                                "en" => "This build has no dandanplay credentials.",
+                                "zh-Hans" => "这个版本没有弹弹play 的凭证，取不到新番列表。"
+                            },
+                            emphasis: secondary
+                        )
+                    }
+                }
+                ShinStatus::Failed => {
+                    // 原因已经显示在上面了；这里只提示还能做什么。
+                    Row(padding_x: 56) {
+                        Text(
+                            content: tr! { "en" => "Try Refresh again later.", "zh-Hans" => "稍后可以点刷新再试。" },
+                            emphasis: secondary
+                        )
+                    }
+                }
+                ShinStatus::NotLoaded => {
+                    shin_shelf(app: app, loading: true)
+                }
             }
         }
     }
 }
 
-/// 首页上的本地媒体库：文件夹里的番剧，海报墙样式。文件夹的管理在媒体库页。
+/// 一排新番海报。`loading` 为真时（正在向弹弹play 取，或还没开始取）显示骨架图。
 #[component]
-pub fn folders_section(app: nkuplay::Client, #[session] draft: MainDraft) -> impl View {
+pub fn shin_shelf(app: nkuplay::Client, loading: bool) -> impl View {
+    ui! {
+        ScrollView(axis: horizontal, indicators: mouse) {
+            Row(gap: 16, align: top, padding_x: 56) {
+                ForEach(items: app.shin_shown, key: id, skeleton: loading, skeleton_count: 8) |anime| {
+                    Button(
+                        id: open_shin,
+                        label: tr! { "en" => "Open {title}", "zh-Hans" => "打开{title}"; title: anime.title }
+                    ) {
+                        anime_card(anime: anime)
+                    } => app.open_anime(anime.id)
+                }
+            }
+        }
+    }
+}
+
+/// 首页最下面的媒体库：一排海报，或者一个虚线框提示怎么添加。
+#[component]
+pub fn library_section(app: nkuplay::Client, #[session] draft: MainDraft) -> impl View {
     ui! {
         Column(gap: 12) {
-            Row(gap: 8, align: center) {
-                Text(content: tr! { "en" => "Local Library", "zh-Hans" => "本地媒体库" }, style: title2)
+            Row(gap: 10, align: center, padding_x: 56) {
+                Text(content: tr! { "en" => "Library", "zh-Hans" => "媒体库" }, style: title2, bold: true)
                 Spacer
                 Button(
-                    id: refresh_library,
-                    label: tr! { "en" => "Refresh", "zh-Hans" => "刷新" },
-                    icon: "arrow.clockwise",
-                    enabled: !app.library_scanning
-                ) => app.refresh_library()
-                Button(
-                    id: add_folder,
-                    label: tr! { "en" => "Add Folder", "zh-Hans" => "添加文件夹" },
-                    icon: "plus",
-                    pick: draft.folder,
-                    files: "folder"
-                ) => app.add_folder(draft.folder)
+                    id: open_library,
+                    label: tr! { "en" => "All ›", "zh-Hans" => "全部 ›" },
+                    variant: link,
+                    prominence: plain
+                ) => draft.page.set(Page::Library)
             }
-            library_wall(app: app)
+            if app.series_count > 0 {
+                ScrollView(axis: horizontal, indicators: mouse) {
+                    Row(gap: 16, align: top, padding_x: 56) {
+                        ForEach(items: app.series, key: id) |show| {
+                            Button(
+                                id: open_shelf,
+                                label: tr! { "en" => "Open {title}", "zh-Hans" => "打开{title}"; title: show.title }
+                            ) {
+                                Column(gap: 8, width: 136) {
+                                    if show.has_poster {
+                                        Image(source: show.poster, width: 136, height: 192, fit: cover, corner: 7)
+                                    } else {
+                                        Canvas(width: 136, height: 192) {
+                                            Shape(kind: rounded, corner: 7, fill: fill.strong)
+                                        }
+                                    }
+                                    Text(content: show.title, font_size: 13, lines: 1)
+                                }
+                            } => app.open_series(show.id)
+                        }
+                    }
+                }
+            } else {
+                Row(padding_x: 56) {
+                    Stack(height: 120) {
+                        Canvas(height: 120) {
+                            Shape(kind: rounded, corner: 8, stroke: text.placeholder, stroke_width: 1, dash: 3, opacity: 0.4)
+                        }
+                        Row(gap: 10, align: center) {
+                            Text(
+                                content: tr! {
+                                    "en" => "Add a folder of shows: each show in it appears here with its poster.",
+                                    "zh-Hans" => "添加放番剧的文件夹，番剧会带着海报显示在这里"
+                                },
+                                font_size: 13,
+                                emphasis: secondary
+                            )
+                            Button(
+                                id: add_folder,
+                                label: tr! { "en" => "Add Folder", "zh-Hans" => "添加文件夹" },
+                                icon: "plus",
+                                pick: draft.folder,
+                                files: "folder"
+                            ) => app.add_folder(draft.folder)
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -443,6 +793,13 @@ pub fn library_page(app: nkuplay::Client, #[session] draft: MainDraft) -> impl V
                 Row(gap: 8, align: center) {
                     Text(content: tr! { "en" => "Library", "zh-Hans" => "媒体库" }, style: large_title)
                     Spacer
+                    Button(
+                        id: open,
+                        label: tr! { "en" => "Open File", "zh-Hans" => "打开文件" },
+                        icon: "folder",
+                        pick: draft.file,
+                        files: "video"
+                    ) => app.open_file(draft.file)
                     Button(
                         id: refresh_library_page,
                         label: tr! { "en" => "Refresh", "zh-Hans" => "刷新" },
@@ -1049,12 +1406,43 @@ pub fn folder_list(app: nkuplay::Client) -> impl View {
     }
 }
 
-/// 还没做的页面。
+/// 新番时间表（还没做）：先放重新取新番列表的按钮。
 #[component]
-pub fn not_yet(page: Page) -> impl View {
+pub fn schedule_page(app: nkuplay::Client) -> impl View {
     ui! {
         Column(gap: 12, padding_x: 56, padding_y: 28) {
-            Text(content: page, style: large_title)
+            Row(gap: 8, align: center) {
+                Text(content: tr! { "en" => "Schedule", "zh-Hans" => "新番时间表" }, style: large_title)
+                Spacer
+                Button(
+                    id: refresh_schedule,
+                    label: tr! { "en" => "Refresh", "zh-Hans" => "刷新" },
+                    icon: "arrow.clockwise",
+                    enabled: app.shin != ShinStatus::Loading
+                ) => app.refresh_shin()
+            }
+            Text(
+                content: tr! { "en" => "This page isn't ready yet.", "zh-Hans" => "这一页还没做。" },
+                emphasis: secondary
+            )
+        }
+    }
+}
+
+/// 观看历史（还没做）：先放去掉文件已经不在的视频的按钮。
+#[component]
+pub fn history_page(app: nkuplay::Client) -> impl View {
+    ui! {
+        Column(gap: 12, padding_x: 56, padding_y: 28) {
+            Row(gap: 8, align: center) {
+                Text(content: tr! { "en" => "History", "zh-Hans" => "观看历史" }, style: large_title)
+                Spacer
+                Button(
+                    id: refresh_recents,
+                    label: tr! { "en" => "Refresh", "zh-Hans" => "刷新" },
+                    icon: "arrow.clockwise"
+                ) => app.refresh_recents()
+            }
             Text(
                 content: tr! { "en" => "This page isn't ready yet.", "zh-Hans" => "这一页还没做。" },
                 emphasis: secondary
@@ -1085,6 +1473,42 @@ style! {
     IconButton.nav_round {
         background: color(light: "#FFFFFF", dark: "#5C5C5C"),
         corner: 17,
+    }
+    // 首页各栏右边的“观看历史 ›”。
+    Button.link {
+        foreground: accent,
+        padding: 0,
+    }
+    // 首页大图上的按钮，不跟随深浅色。
+    Button.hero_play {
+        background: color(light: "#005FB8", dark: "#005FB8"),
+        foreground: color(light: "#FFFFFF", dark: "#FFFFFF"),
+        corner: 5,
+    }
+    Button.hero_details {
+        background: color(light: "#FFFFFF", dark: "#FFFFFF"),
+        foreground: color(light: "#1B1B1B", dark: "#1B1B1B"),
+        corner: 5,
+    }
+    IconButton.hero_arrow {
+        background: color(light: "#F5F5F5", dark: "#F5F5F5"),
+        foreground: color(light: "#1B1B1B", dark: "#1B1B1B"),
+        corner: 17,
+    }
+    // 本季新番的星期。
+    Button.day_on {
+        background: color(light: "#1B1B1B", dark: "#F3F3F3"),
+        foreground: color(light: "#FFFFFF", dark: "#1B1B1B"),
+        corner: 16,
+    }
+    Button.day {
+        background: color(light: "#E9E9E9", dark: "#2D2D2D"),
+        foreground: color(light: "#444444", dark: "#CCCCCC"),
+        corner: 16,
+    }
+    // 继续播放卡片的画面：圆角连同底边的进度一起切。
+    Stack.card_picture {
+        corner: 7,
     }
     Button.group_on {
         background: color(light: "#1B1B1B", dark: "#F3F3F3"),

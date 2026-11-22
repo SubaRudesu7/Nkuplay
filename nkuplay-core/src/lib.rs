@@ -15,8 +15,9 @@ use library::Library;
 use nkuplay_dandanplay::{Comment, CommentMode};
 use nkuplay_mpv::{DanmakuComment, DanmakuMode};
 use nkuplay_protocol::nkuplay::{
-    self, Backdrop, DanmakuStatus, DetailComment, DetailEpisode, DetailFact, DetailGroup,
-    DetailScore, DetailTag, Folder, Recent, Series, ShinAnime, ShinStatus, State, Weekday,
+    self, Backdrop, DanmakuStatus, DayChip, DetailComment, DetailEpisode, DetailFact, DetailGroup,
+    DetailScore, DetailTag, Folder, HeroDot, HomeMark, Recent, Series, ShinAnime, ShinStatus,
+    State, Weekday,
 };
 use shin::Season;
 use std::collections::{HashMap, HashSet};
@@ -46,6 +47,8 @@ enum Arrival {
     Stills(String, Vec<PathBuf>),
     /// 一集的缩略图（第一项是 [`stills_key`]，第二项是第几集）。
     Thumb(String, u32, PathBuf),
+    /// 首页大图要的剧照下载好了。
+    HomeStills,
     /// 视频（第一项）离开时的画面存好了。
     Shot(String, PathBuf),
 }
@@ -104,6 +107,21 @@ fn last_page(count: usize) -> usize {
     count.saturating_sub(STRIP_PAGE as usize)
 }
 
+/// 看了 `percent`（百分之几）时，进度条画多长，0 到 1。
+fn bar_of(percent: i64) -> f64 {
+    (percent as f64 / 100.0).clamp(0.02, 1.0)
+}
+
+/// 剧集名开头的“第N话”，例如 `第5话 救救我` 是 `第5话`；不是这样写的为空。
+fn part_of(episode: &str) -> String {
+    episode
+        .split_whitespace()
+        .next()
+        .filter(|first| first.starts_with('第'))
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn group_of(group: details::Group) -> DetailGroup {
     match group {
         details::Group::Main => DetailGroup::Main,
@@ -112,6 +130,13 @@ fn group_of(group: details::Group) -> DetailGroup {
     }
 }
 
+/// 文字里的第一个数字，例如 `第11话 魔女克芮丝` 是 11。
+fn first_number(text: &str) -> Option<u32> {
+    text.split(|c: char| !c.is_ascii_digit())
+        .find(|part| !part.is_empty())?
+        .parse()
+        .ok()
+}
 /// 刚打开视频后多久以内不记进度：播放器报的位置可能还是上一个视频的。
 const RECORD_AFTER: Duration = Duration::from_secs(3);
 /// 看过不到这么多（毫秒）的不续播，从头开始。
@@ -214,6 +239,14 @@ pub struct NkuplayEngine {
     playing: Option<(String, Instant)>,
     /// 继续观看卡片上的画面存在哪里；没有时不存。
     shots: Option<PathBuf>,
+    /// 首页大图正在显示的那个视频的地址。
+    hero_url: Option<String>,
+    /// 首页大图用的剧照：作品编号和集数到图片；查过没有的记成空，免得反复读文件。
+    hero_stills: HashMap<(i64, u32), Option<PathBuf>>,
+    /// 作品的类别，也是查过就记下。
+    kinds: HashMap<i64, String>,
+    /// 首页的大图已经在后台准备过。
+    home_loaded: bool,
     today: Today,
     /// 后台做完的事从这里回来。
     results: (Sender<Arrival>, Receiver<Arrival>),
@@ -333,9 +366,21 @@ impl NkuplayEngine {
                 volume: 1.0,
                 recents: Vec::new(),
                 recent_count: 0,
+                hero: Vec::new(),
+                hero_dots: Vec::new(),
+                // 记号在 0、380 和 410：滚到 400 左右报 102。“继续播放”的标题在 450，再滚就到顶栏下面了。
+                home_marks: [(100, 380.0), (101, 30.0), (102, 1.0)]
+                    .map(|(id, height)| HomeMark { id, height })
+                    .into(),
+                today: Vec::new(),
+                today_count: 0,
+                today_day: today.weekday.clone(),
                 shin: ShinStatus::NotLoaded,
                 shin_outdated: false,
+                shin_year: String::new(),
+                shin_month: 1,
                 shin_day: today.weekday.clone(),
+                shin_days: Vec::new(),
                 shin_shown: Vec::new(),
                 shin_count: 0,
                 shin_error: String::new(),
@@ -401,12 +446,17 @@ impl NkuplayEngine {
             backdrop: (String::new(), 0),
             playing: None,
             shots: sources.shots,
+            hero_url: None,
+            hero_stills: HashMap::new(),
+            kinds: HashMap::new(),
+            home_loaded: false,
             today,
             results: channel(),
             run,
             last_seek: None,
         };
         engine.publish_library();
+        engine.publish_shin();
         engine
     }
 
@@ -475,6 +525,7 @@ impl NkuplayEngine {
                 let url = self.state.source.url.clone();
                 self.library.identified(
                     &url,
+                    loaded.anime_id,
                     &loaded.anime_title,
                     &loaded.episode_title,
                     loaded.poster.as_deref(),
@@ -529,33 +580,149 @@ impl NkuplayEngine {
         Ok(())
     }
 
-    /// 把继续观看和媒体库放进界面状态。
-    fn publish_library(&mut self) {
-        self.state.recents = self
+    /// 继续播放的每一部番。
+    fn watching(&mut self) -> Vec<Recent> {
+        let recents: Vec<library::RecentFile> = self
             .library
-            .recents
+            .watching()
+            .into_iter()
+            .map(|recent| library::RecentFile {
+                anime_id: self.library.anime_of(recent),
+                ..recent.clone()
+            })
+            .collect();
+        recents
             .iter()
             .enumerate()
             .map(|(index, recent)| {
-                let (poster, has_poster) = poster(recent.poster.as_deref());
+                let (poster_source, has_poster) = poster(recent.poster.as_deref());
                 let shot = recent.shot.as_ref().filter(|shot| shot.is_file());
+                // 大图：这一集的剧照，没有用离开时的画面，再没有用虚化的海报。
+                let still = self.hero_still(recent);
+                let picture = still.clone().or_else(|| shot.cloned());
+                // 卡片：离开时的画面，没有用这一集的剧照。
+                let shot = match still {
+                    Some(still) if shot.is_none() => Some(still),
+                    _ => shot.cloned(),
+                };
+                let percent = self
+                    .library
+                    .progress
+                    .get(&recent.url)
+                    .map_or(0, |watched| watched.percent());
                 Recent {
                     id: index as i64 + 1,
                     title: recent.title.clone(),
                     episode: recent.episode.clone(),
                     source: MediaSource::new(recent.url.clone()),
-                    poster,
-                    has_poster,
-                    shot: shot.map_or_else(no_source, MediaSource::file),
                     has_shot: shot.is_some(),
-                    percent: self
-                        .library
-                        .progress
-                        .get(&recent.url)
-                        .map_or(0, |watched| watched.percent()),
+                    shot: shot.map_or_else(no_source, MediaSource::file),
+                    percent,
+                    bar: bar_of(percent),
+                    part: part_of(&recent.episode),
+                    kind: self.kind_of(recent),
+                    anime_id: recent.anime_id.unwrap_or(0),
+                    has_backdrop: picture.is_some() || has_poster,
+                    sharp: picture.is_some(),
+                    backdrop: picture.map_or_else(|| poster_source.clone(), MediaSource::file),
+                    poster: poster_source,
+                    has_poster,
                 }
             })
+            .collect()
+    }
+
+    /// 视频所在那一集的剧照，只看缓存：详情和剧照都已经下载过才有。
+    fn hero_still(&mut self, recent: &library::RecentFile) -> Option<PathBuf> {
+        let key = (recent.anime_id?, first_number(&recent.episode)?);
+        if let Some(known) = self.hero_stills.get(&key) {
+            return known.clone();
+        }
+        let found = self
+            .tmdb_of(key.0)
+            .and_then(|(tv, season)| self.stills.cached(tv, season, key.1).into_iter().next());
+        self.hero_stills.insert(key, found.clone());
+        found
+    }
+
+    /// 作品的类别（例如“TV动画”），只看缓存里的详情；不知道时为空。
+    fn kind_of(&mut self, recent: &library::RecentFile) -> String {
+        let Some(anime_id) = recent.anime_id else {
+            return String::new();
+        };
+        let source = &self.details_source;
+        self.kinds
+            .entry(anime_id)
+            .or_insert_with(|| {
+                source
+                    .cached(anime_id)
+                    .and_then(|info| info.details)
+                    .map(|details| details.type_description)
+                    .unwrap_or_default()
+            })
+            .clone()
+    }
+
+    /// 缓存里的详情或剧照变了：首页记下的重新查。
+    fn forget_looked_up(&mut self) {
+        self.hero_stills.clear();
+        self.kinds.clear();
+    }
+
+    /// 作品在 TMDB 上的编号和季，只看缓存里的详情。
+    fn tmdb_of(&self, anime_id: i64) -> Option<(i64, u32)> {
+        let info = self.details_source.cached(anime_id)?;
+        details::tmdb(info.details.as_ref()?)
+    }
+
+    /// 把首页大图放进界面状态；正在显示的那部不在了就换成第一部。
+    fn publish_hero(&mut self) {
+        let recents = &self.state.recents;
+        let at = self
+            .hero_url
+            .as_ref()
+            .and_then(|url| recents.iter().position(|recent| &recent.source.url == url))
+            .unwrap_or(0);
+        let shown = recents.get(at).cloned();
+        self.hero_url = shown.as_ref().map(|recent| recent.source.url.clone());
+        self.state.hero_dots = recents
+            .iter()
+            .enumerate()
+            .map(|(index, recent)| HeroDot {
+                id: recent.id,
+                on: index == at,
+            })
             .collect();
+        self.state.hero = shown.into_iter().collect();
+    }
+
+    /// 把今天更新的新番放进界面状态。
+    fn publish_today(&mut self) {
+        self.state.today = self.shin_on(&self.today.weekday);
+        self.state.today_count = self.state.today.len() as i64;
+    }
+
+    /// 新番列表里 `day` 那天更新的番。
+    fn shin_on(&self, day: &Weekday) -> Vec<ShinAnime> {
+        self.season
+            .iter()
+            .flat_map(|season| season.anime.iter())
+            .filter(|anime| weekday(anime.day) == *day)
+            .map(|anime| {
+                let (poster, has_poster) = poster(anime.poster.as_deref());
+                ShinAnime {
+                    id: anime.id,
+                    title: anime.title.clone(),
+                    poster,
+                    has_poster,
+                }
+            })
+            .collect()
+    }
+
+    /// 把继续观看和媒体库放进界面状态。
+    fn publish_library(&mut self) {
+        self.state.recents = self.watching();
         self.state.folders = self
             .library
             .folders
@@ -569,6 +736,7 @@ impl NkuplayEngine {
             })
             .collect();
         self.state.recent_count = self.state.recents.len() as i64;
+        self.publish_hero();
         self.state.folder_count = self.state.folders.len() as i64;
 
         self.shelf = self.library.shelf();
@@ -1032,13 +1200,10 @@ impl NkuplayEngine {
                 .progress
                 .get(&url)
                 .map_or(0, |watched| watched.percent());
-            if let Some(recent) = self
-                .state
-                .recents
-                .iter_mut()
-                .find(|recent| recent.source.url == url)
-            {
+            let shown = self.state.recents.iter_mut().chain(&mut self.state.hero);
+            for recent in shown.filter(|recent| recent.source.url == url) {
                 recent.percent = percent;
+                recent.bar = bar_of(percent);
             }
             // 选中的那一集可能因此变了：背景跟着换。
             self.want_images(true);
@@ -1053,31 +1218,27 @@ impl NkuplayEngine {
 
     /// 把新番列表里 `shin_day` 那天更新的番放进界面状态。
     fn publish_shin(&mut self) {
-        let day = self.state.shin_day.clone();
-        self.state.shin_shown = self
-            .season
-            .iter()
-            .flat_map(|season| season.anime.iter())
-            .filter(|anime| weekday(anime.day) == day)
-            .map(|anime| {
-                let (poster, has_poster) = poster(anime.poster.as_deref());
-                ShinAnime {
-                    id: anime.id,
-                    title: anime.title.clone(),
-                    poster,
-                    has_poster,
-                }
+        self.state.shin_shown = self.shin_on(&self.state.shin_day);
+        self.state.shin_count = self.state.shin_shown.len() as i64;
+        self.state.shin_days = (0..7)
+            .map(|at| DayChip {
+                id: i64::from(at) + 201,
+                day: weekday(at),
+                on: weekday(at) == self.state.shin_day,
             })
             .collect();
-        self.state.shin_count = self.state.shin_shown.len() as i64;
     }
 
     fn take_season(&mut self, season: Season) {
         self.state.shin = ShinStatus::Loaded;
         self.state.shin_outdated = season.id < self.today.season();
+        let (year, month) = season.id.split_at_checked(4).unwrap_or(("", ""));
+        self.state.shin_year = year.to_string();
+        self.state.shin_month = month.parse().unwrap_or(1);
         self.state.shin_error.clear();
         self.season = Some(season);
         self.publish_shin();
+        self.publish_today();
     }
 
     /// 在后台向弹弹play 取新番列表。
@@ -1373,6 +1534,52 @@ impl nkuplay::Commands for NkuplayEngine {
         Ok(())
     }
 
+    fn load_home(&mut self) -> Result<(), CommandError> {
+        if self.home_loaded || !self.stills.available() {
+            return Ok(());
+        }
+        self.home_loaded = true;
+        // 详情已经在缓存里的番，取它最近看的那一集的一张剧照；不为此向弹弹play 发请求。
+        let wanted: Vec<(i64, u32, u32)> = self
+            .library
+            .watching()
+            .into_iter()
+            .filter_map(|recent| {
+                let episode = first_number(&recent.episode)?;
+                let (tv, season) = self.tmdb_of(self.library.anime_of(recent)?)?;
+                Some((tv, season, episode))
+            })
+            .collect();
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let stills = Arc::clone(&self.stills);
+        self.in_background(move || {
+            for (tv, season, episode) in wanted {
+                let _ = stills.fetch(tv, season, episode, 1);
+            }
+            Arrival::HomeStills
+        });
+        Ok(())
+    }
+
+    fn show_hero(&mut self, id: i64) -> Result<(), CommandError> {
+        if let Some(recent) = self.state.recents.iter().find(|recent| recent.id == id) {
+            self.hero_url = Some(recent.source.url.clone());
+            self.publish_hero();
+        }
+        Ok(())
+    }
+
+    fn step_hero(&mut self, step: i64) -> Result<(), CommandError> {
+        let count = self.state.recents.len() as i64;
+        if count > 0 {
+            let at = self.state.hero.first().map_or(0, |hero| hero.id - 1);
+            self.show_hero(at.saturating_add(step).rem_euclid(count) + 1)?;
+        }
+        Ok(())
+    }
+
     fn clear_progress(&mut self) -> Result<(), CommandError> {
         let Some((rows, _)) = self.detail_rows() else {
             return Ok(());
@@ -1504,6 +1711,7 @@ impl nkuplay::Engine for NkuplayEngine {
                         Err(reason) => detail.error = reason,
                     }
                     // 这里拿不到唤醒器，只看缓存；缺的图由取资料的那件后台的事顺便取。
+                    self.forget_looked_up();
                     self.read_thumbs();
                     self.want_images(false);
                     self.reset_strip();
@@ -1522,7 +1730,12 @@ impl nkuplay::Engine for NkuplayEngine {
                         self.publish_detail();
                     }
                 }
+                Arrival::HomeStills => {
+                    self.forget_looked_up();
+                    self.publish_library();
+                }
                 Arrival::Stills(key, found) => {
+                    self.forget_looked_up();
                     let wanted = self.wanted_stills().map(|(wanted, ..)| wanted);
                     if let Some(detail) = self.detail.as_mut()
                         && wanted.as_deref() == Some(key.as_str())
@@ -2093,6 +2306,53 @@ mod tests {
     }
 
     #[test]
+    fn the_home_page_pages_through_the_shows_being_watched() {
+        let mut engine = engine(None, at_once);
+        assert!(engine.state.hero.is_empty());
+        engine.step_hero(1).unwrap();
+        for file in ["C:/a.mkv", "C:/b.mkv", "C:/c.mkv"] {
+            engine.open_file(MediaSource::file(file)).unwrap();
+        }
+        assert_eq!(engine.state.hero_dots.len(), 3);
+        let at = |engine: &NkuplayEngine| engine.state.hero[0].id;
+        engine.show_hero(1).unwrap();
+        engine.step_hero(1).unwrap();
+        assert_eq!(at(&engine), 2);
+        engine.step_hero(2).unwrap();
+        assert_eq!(at(&engine), 1);
+        engine.step_hero(-1).unwrap();
+        assert_eq!(at(&engine), 3);
+        assert!(engine.state.hero_dots[2].on);
+        // 没有的编号什么也不做。
+        engine.show_hero(9).unwrap();
+        assert_eq!(at(&engine), 3);
+    }
+
+    #[test]
+    fn the_home_picture_uses_the_still_of_the_episode_when_it_is_cached() {
+        let cache = Scratch::named("home-stills");
+        let mut engine = engine_with_stills(None, cache.0.clone());
+        engine.open_file(MediaSource::file("C:/lara.mkv")).unwrap();
+        let url = engine.state.recents[0].source.url.clone();
+        engine
+            .library
+            .identified(&url, 18643, "再见，拉拉", "第2话 奔走于滋贺", None);
+        engine.save_library();
+        // 详情还没缓存过：不为大图向弹弹play 发请求，也就没有剧照。
+        engine.load_home().unwrap();
+        assert!(!engine.state.recents[0].has_backdrop);
+        // 打开过详情页以后就有了。
+        engine.open_anime(18643).unwrap();
+        engine.wake();
+        engine.home_loaded = false;
+        engine.load_home().unwrap();
+        engine.wake();
+        let recent = &engine.state.recents[0];
+        assert!(recent.sharp && recent.backdrop.url.ends_with("a.jpg"));
+        assert_eq!(engine.state.hero[0].backdrop, recent.backdrop);
+    }
+
+    #[test]
     fn four_comments_show_until_the_rest_of_the_page_is_expanded() {
         let mut engine = engine_with_details(details::tests::FakeApi {
             comment_count: 7,
@@ -2222,12 +2482,34 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(titles(&engine), ["周一的番"]);
+        // 今天（周一）更新的，不跟着选的那一天变。
+        assert_eq!(engine.state.today_count, 1);
+        assert_eq!(engine.state.today[0].title, "周一的番");
         assert!(engine.state.shin_shown[0].has_poster);
 
         engine.show_day(Weekday::Sunday).unwrap();
         assert_eq!(titles(&engine), ["周日的番"]);
         engine.show_day(Weekday::Tuesday).unwrap();
         assert!(engine.state.shin_shown.is_empty());
+    }
+
+    #[test]
+    fn the_season_is_named_and_the_chosen_day_is_marked() {
+        let mut engine = engine_with_shin(shin::tests::FakeApi::season(), None);
+        engine.load_shin().unwrap();
+        engine.wake();
+        assert_eq!(engine.state.shin_year, "2026");
+        assert_eq!(engine.state.shin_month, 10);
+        let on: Vec<_> = engine.state.shin_days.iter().map(|day| day.on).collect();
+        assert_eq!(on, [true, false, false, false, false, false, false]);
+    }
+
+    #[test]
+    fn cards_show_the_part_and_a_short_bar_from_the_start() {
+        assert_eq!(part_of("第5话 救救我"), "第5话");
+        assert_eq!(part_of("特别篇"), "");
+        assert_eq!(part_of(""), "");
+        assert_eq!((bar_of(0), bar_of(38), bar_of(100)), (0.02, 0.38, 1.0));
     }
 
     #[test]

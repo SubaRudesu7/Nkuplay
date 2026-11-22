@@ -74,8 +74,8 @@ pub fn app(app: nkuplay::Client, windows: AppWindows, players: Players) -> impl 
                 chrome: unified,
                 // 视频页隐藏标题栏；鼠标停住后连指针也隐藏。
                 immersive: app.has_video,
-                // 鼠标 3 秒不动，`window.idle` 变真，视频页的按钮随之隐藏。
-                idle_after: 3
+                // 1 秒没有操作，`window.idle` 变真，视频页的按钮随之隐藏。
+                idle_after: 1
             ) {
                 main_window(app: app, windows: windows, players: players)
             }
@@ -1554,7 +1554,7 @@ style! {
 }
 
 /// 视频页：画面铺满窗口，上面不压任何界面。鼠标一动，透明的顶栏和底栏滑进来，
-/// 3 秒不动就滑出去，指针也随之隐藏（窗口是 immersive 的，Bern 在 `window.idle`
+/// 1 秒不动就滑出去，指针也随之隐藏（窗口是 immersive 的，Bern 在 `window.idle`
 /// 时隐藏指针）。全屏由用户自己切换（按钮、F 键、双击画面；全屏时 Esc 退出）。
 /// 单击画面暂停或继续，右键打开菜单；上下键调音量，左右键后退、前进 5 秒，D 显示或隐藏弹幕。
 #[component]
@@ -1566,7 +1566,7 @@ pub fn player(
 ) -> impl View {
     ui! {
         // 不标 idle_area：标了以后，Bern 只在鼠标停在那块区域上时才算静止，
-        // 实测在视频页上停多久都不算。不标时，鼠标在窗口里任何地方 3 秒不动就算静止。
+        // 实测在视频页上停多久都不算。不标时，鼠标在窗口里任何地方 1 秒不动就算静止。
         Stack(variant: player_black) {
             Video(
                 id: video,
@@ -1633,9 +1633,9 @@ pub fn player(
             Shortcut(key: "space", enabled: !players.video.playing) => players.video.play()
             Shortcut(key: "up") => app.nudge_volume(0.05)
             Shortcut(key: "down") => app.nudge_volume(-0.05)
-            // `ui!` 不能做加减，由引擎从当前位置算出要跳到哪里。
-            Shortcut(key: "left") => app.skip(-5.0, players.video.position_ms, players.video.duration_ms)
-            Shortcut(key: "right") => app.skip(5.0, players.video.position_ms, players.video.duration_ms)
+            // `ui!` 不能做加减，由引擎从当前位置算出要跳到哪里。`quiet`：不算“有操作”，上下栏和指针不出来。
+            Shortcut(key: "left", quiet: true) => app.skip(-5.0, players.video.position_ms, players.video.duration_ms)
+            Shortcut(key: "right", quiet: true) => app.skip(5.0, players.video.position_ms, players.video.duration_ms)
             Shortcut(key: "f") => windows.main.toggle_fullscreen()
             Shortcut(key: "d") => app.toggle_danmaku()
             Shortcut(key: "escape", enabled: window.fullscreen) => windows.main.toggle_fullscreen()

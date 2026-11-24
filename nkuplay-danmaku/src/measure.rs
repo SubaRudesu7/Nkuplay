@@ -22,17 +22,34 @@ pub struct Measure {
     font: Option<&'static Font>,
 }
 
-/// Windows 上弹幕用的字体，进程里只读一次。
-static SYSTEM: OnceLock<Option<Font>> = OnceLock::new();
+/// 弹幕可以选的字体：交给 libass 的名字和 Windows 字体目录里的文件。
+pub const FONTS: [(&str, &str); 4] = [
+    ("Microsoft YaHei", "msyh.ttc"),
+    ("SimHei", "simhei.ttf"),
+    ("DengXian", "Deng.ttf"),
+    ("SimSun", "simsun.ttc"),
+];
+
+/// 读过的字体，每种在进程里只读一次。
+static LOADED: [OnceLock<Option<Font>>; FONTS.len()] = [const { OnceLock::new() }; FONTS.len()];
 
 impl Measure {
     /// 用 Windows 自带的微软雅黑量；读不到就估算。字体文件只在第一次调用时读。
     pub fn system() -> Self {
-        let font = SYSTEM.get_or_init(|| {
+        Self::for_font(FONTS[0].0)
+    }
+
+    /// 用 [`FONTS`] 里名叫 `name` 的字体量；不认识的名字用微软雅黑，读不到就估算。
+    pub fn for_font(name: &str) -> Self {
+        let index = FONTS
+            .iter()
+            .position(|(font, _)| *font == name)
+            .unwrap_or(0);
+        let font = LOADED[index].get_or_init(|| {
             let windows = std::env::var_os("WINDIR")?;
             let path = std::path::Path::new(&windows)
                 .join("Fonts")
-                .join("msyh.ttc");
+                .join(FONTS[index].1);
             let data = std::fs::read(path).ok()?;
             // 字体在整个进程里都要用，留着不释放。
             Font::parse(Box::leak(data.into_boxed_slice()))

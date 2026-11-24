@@ -9,3 +9,5 @@ publish = false
 [dependencies]
 # 读系统字体里每个字的宽度，让排版和 libass 画出来的一致。
 ttf-parser = "0.25"
+# 屏蔽词里写成 `/…/` 的按正则表达式匹配。
+regex = "1"

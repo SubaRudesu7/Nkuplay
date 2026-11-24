@@ -194,7 +194,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bern"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "bern-command",
  "bern-macros",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "bern-command"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "bern-protocol",
  "block2",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "bern-ir"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "bern-protocol",
  "serde",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "bern-macros"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "bern-ir",
  "bern-protocol",
@@ -250,14 +250,14 @@ dependencies = [
 
 [[package]]
 name = "bern-media"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "bern-protocol",
 ]
 
 [[package]]
 name = "bern-protocol"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -265,14 +265,14 @@ dependencies = [
 
 [[package]]
 name = "bern-runtime"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "bern-protocol",
 ]
 
 [[package]]
 name = "bern-script"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "bern-syntax"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "bern-media",
  "bern-protocol",
@@ -941,6 +941,7 @@ dependencies = [
 name = "nkuplay-danmaku"
 version = "0.1.0"
 dependencies = [
+ "regex",
  "ttf-parser",
 ]
 

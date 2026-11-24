@@ -11,6 +11,7 @@ pub enum Handle {}
 /// `mpv_render_context`。
 pub enum RenderContext {}
 
+pub const FORMAT_STRING: c_int = 1;
 pub const FORMAT_FLAG: c_int = 3;
 pub const FORMAT_DOUBLE: c_int = 5;
 

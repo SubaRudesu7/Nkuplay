@@ -167,6 +167,9 @@ pub struct Library {
     /// 详情页的合并键到它的背景设置。
     #[serde(default)]
     pub backdrops: BTreeMap<String, BackdropChoice>,
+    /// 从媒体库隐藏了的番（海报墙的合并键）。
+    #[serde(default)]
+    pub hidden: Vec<String>,
 }
 
 impl Library {
@@ -450,6 +453,11 @@ pub struct Store {
 impl Store {
     pub fn new(folder: Option<PathBuf>) -> Self {
         Self { folder }
+    }
+
+    /// 存放数据的文件夹；没有时不存。
+    pub fn folder(&self) -> Option<&PathBuf> {
+        self.folder.as_ref()
     }
 
     /// 应用的数据文件夹。

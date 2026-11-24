@@ -179,6 +179,14 @@ pub mod nkuplay {
         pub has_poster: bool,
         /// 有几集。
         pub episodes: i64,
+        /// 看过（看完或看了一部分）的最后一集是第几话；都没看过时为 0。
+        pub watched_up_to: i64,
+        /// 每一集都看完了。
+        pub finished: bool,
+        /// 看完了几分之几的集，0 到 1：海报底边的进度。
+        pub bar: f64,
+        /// “继续”要播的那一集是第几话。
+        pub resume_number: i64,
     }
 
     /// 详情页剧集列表里的一集：弹弹play 的一集（对上了本地文件或没对上），或本地多出来的文件。
@@ -255,6 +263,426 @@ pub mod nkuplay {
         pub source: MediaSource,
         /// 是剧照（清晰显示）；否则是海报（虚化显示）。
         pub still: bool,
+    }
+
+    /// 界面跟随系统，或固定浅色、深色。
+    #[value]
+    pub enum Appearance {
+        #[label(tr! { "en" => "System", "zh-Hans" => "跟随系统" })]
+        System,
+        #[label(tr! { "en" => "Light", "zh-Hans" => "浅色" })]
+        Light,
+        #[label(tr! { "en" => "Dark", "zh-Hans" => "深色" })]
+        Dark,
+    }
+
+    /// 顶栏能放的页面。
+    #[value]
+    pub enum Page {
+        #[label(tr! { "en" => "Home", "zh-Hans" => "首页" })]
+        Home,
+        #[label(tr! { "en" => "Library", "zh-Hans" => "媒体库" })]
+        Library,
+        #[label(tr! { "en" => "Schedule", "zh-Hans" => "新番时间表" })]
+        Schedule,
+        #[label(tr! { "en" => "History", "zh-Hans" => "观看历史" })]
+        History,
+    }
+
+    /// 一集播完以后做什么。
+    #[value]
+    pub enum AfterEnd {
+        #[label(tr! { "en" => "Next", "zh-Hans" => "下一话" })]
+        Next,
+        #[label(tr! { "en" => "Loop", "zh-Hans" => "循环" })]
+        Loop,
+        #[label(tr! { "en" => "Stop", "zh-Hans" => "停住" })]
+        Stop,
+        #[label(tr! { "en" => "Back", "zh-Hans" => "返回" })]
+        Back,
+    }
+
+    /// 片头片尾（按 mkv 章节认）怎么处理。
+    #[value]
+    pub enum SkipMode {
+        #[label(tr! { "en" => "Off", "zh-Hans" => "不提示" })]
+        Off,
+        #[label(tr! { "en" => "Button", "zh-Hans" => "显示按钮" })]
+        Button,
+        #[label(tr! { "en" => "Auto", "zh-Hans" => "自动跳过" })]
+        Auto,
+    }
+
+    /// Anime4K 超分的档位。
+    #[value]
+    pub enum Upscale {
+        #[label(tr! { "en" => "Off", "zh-Hans" => "关闭" })]
+        Off,
+        #[label(tr! { "en" => "Light", "zh-Hans" => "轻量" })]
+        Light,
+        #[label(tr! { "en" => "Standard", "zh-Hans" => "标准" })]
+        Standard,
+        #[label(tr! { "en" => "High", "zh-Hans" => "高质量" })]
+        High,
+    }
+
+    /// 画面比例。
+    #[value]
+    pub enum Aspect {
+        #[label(tr! { "en" => "Match Video", "zh-Hans" => "跟随视频" })]
+        Auto,
+        #[label(tr! { "en" => "16:9", "zh-Hans" => "16:9" })]
+        Wide,
+        #[label(tr! { "en" => "4:3", "zh-Hans" => "4:3" })]
+        Classic,
+        #[label(tr! { "en" => "21:9", "zh-Hans" => "21:9" })]
+        Cinema,
+        #[label(tr! { "en" => "Stretch", "zh-Hans" => "填满" })]
+        Stretch,
+    }
+
+    /// 画面比例和窗口不一样时怎么摆。
+    #[value]
+    pub enum Fill {
+        #[label(tr! { "en" => "Fit", "zh-Hans" => "完整显示" })]
+        Fit,
+        #[label(tr! { "en" => "Crop", "zh-Hans" => "裁掉黑边" })]
+        Crop,
+    }
+
+    /// 弹幕的字体。
+    #[value]
+    pub enum DanmakuFont {
+        #[label(tr! { "en" => "Microsoft YaHei", "zh-Hans" => "微软雅黑" })]
+        YaHei,
+        #[label(tr! { "en" => "SimHei", "zh-Hans" => "黑体" })]
+        Hei,
+        #[label(tr! { "en" => "DengXian", "zh-Hans" => "等线" })]
+        Deng,
+        #[label(tr! { "en" => "SimSun", "zh-Hans" => "宋体" })]
+        Song,
+    }
+
+    /// 设置里的开关。
+    #[value]
+    pub enum Toggle {
+        #[label(tr! { "en" => "Resume", "zh-Hans" => "从上次的位置继续" })]
+        Resume,
+        #[label(tr! { "en" => "Full screen on start", "zh-Hans" => "自动全屏" })]
+        AutoFullscreen,
+        #[label(tr! { "en" => "Keep pitch", "zh-Hans" => "倍速时保持音调" })]
+        KeepPitch,
+        #[label(tr! { "en" => "Chapters", "zh-Hans" => "章节标记" })]
+        Chapters,
+        #[label(tr! { "en" => "Danmaku heat", "zh-Hans" => "弹幕热度" })]
+        Heat,
+        #[label(tr! { "en" => "Hover preview", "zh-Hans" => "悬停预览图" })]
+        Preview,
+        #[label(tr! { "en" => "Hardware decoding", "zh-Hans" => "硬件解码" })]
+        Hwdec,
+        #[label(tr! { "en" => "Overlap", "zh-Hans" => "允许重叠" })]
+        Overlap,
+        #[label(tr! { "en" => "Scrolling", "zh-Hans" => "滚动" })]
+        Scroll,
+        #[label(tr! { "en" => "Top", "zh-Hans" => "顶部" })]
+        Top,
+        #[label(tr! { "en" => "Bottom", "zh-Hans" => "底部" })]
+        Bottom,
+        #[label(tr! { "en" => "Colors", "zh-Hans" => "彩色" })]
+        Colored,
+        #[label(tr! { "en" => "Merge repeats", "zh-Hans" => "合并重复" })]
+        Merge,
+    }
+
+    /// 设置里的数值。
+    #[value]
+    pub enum Amount {
+        #[label(tr! { "en" => "Countdown", "zh-Hans" => "下一话倒计时" })]
+        Countdown,
+        #[label(tr! { "en" => "Manual skip", "zh-Hans" => "手动跳过" })]
+        SkipSeconds,
+        #[label(tr! { "en" => "Seek step", "zh-Hans" => "快进快退" })]
+        SeekStep,
+        #[label(tr! { "en" => "Hold speed", "zh-Hans" => "长按倍速" })]
+        HoldSpeed,
+        #[label(tr! { "en" => "Bar stays", "zh-Hans" => "控制栏停留" })]
+        BarStay,
+        #[label(tr! { "en" => "Cache", "zh-Hans" => "预缓存" })]
+        Cache,
+        #[label(tr! { "en" => "Opacity", "zh-Hans" => "不透明度" })]
+        Opacity,
+        #[label(tr! { "en" => "Size", "zh-Hans" => "字号" })]
+        Size,
+        #[label(tr! { "en" => "Outline", "zh-Hans" => "描边" })]
+        Outline,
+        #[label(tr! { "en" => "Area", "zh-Hans" => "显示区域" })]
+        Area,
+        #[label(tr! { "en" => "Scroll time", "zh-Hans" => "滚动时间" })]
+        ScrollTime,
+        #[label(tr! { "en" => "Line gap", "zh-Hans" => "行距" })]
+        Gap,
+    }
+
+    /// 能改按键的操作。
+    #[value]
+    pub enum KeyAction {
+        #[label(tr! { "en" => "Play / Pause", "zh-Hans" => "播放 / 暂停" })]
+        Play,
+        #[label(tr! { "en" => "Back", "zh-Hans" => "快退" })]
+        Rewind,
+        #[label(tr! { "en" => "Forward", "zh-Hans" => "快进" })]
+        Forward,
+        #[label(tr! { "en" => "Previous", "zh-Hans" => "上一话" })]
+        Previous,
+        #[label(tr! { "en" => "Next", "zh-Hans" => "下一话" })]
+        Next,
+        #[label(tr! { "en" => "Skip", "zh-Hans" => "跳过" })]
+        Skip,
+        #[label(tr! { "en" => "Faster", "zh-Hans" => "加快 0.1" })]
+        Faster,
+        #[label(tr! { "en" => "Slower", "zh-Hans" => "减慢 0.1" })]
+        Slower,
+        #[label(tr! { "en" => "Normal speed", "zh-Hans" => "恢复 1 倍" })]
+        NormalSpeed,
+        #[label(tr! { "en" => "Hold to speed up", "zh-Hans" => "长按快进" })]
+        Hold,
+        #[label(tr! { "en" => "Louder", "zh-Hans" => "增大音量" })]
+        Louder,
+        #[label(tr! { "en" => "Quieter", "zh-Hans" => "减小音量" })]
+        Quieter,
+        #[label(tr! { "en" => "Mute", "zh-Hans" => "静音" })]
+        Mute,
+        #[label(tr! { "en" => "Danmaku", "zh-Hans" => "显示 / 隐藏弹幕" })]
+        Danmaku,
+        #[label(tr! { "en" => "Danmaku panel", "zh-Hans" => "弹幕面板" })]
+        DanmakuPanel,
+        #[label(tr! { "en" => "Subtitles", "zh-Hans" => "切换字幕" })]
+        Subtitle,
+        #[label(tr! { "en" => "Audio", "zh-Hans" => "切换音轨" })]
+        Audio,
+        #[label(tr! { "en" => "Full screen", "zh-Hans" => "全屏" })]
+        Fullscreen,
+        #[label(tr! { "en" => "Exit full screen", "zh-Hans" => "退出全屏" })]
+        ExitFullscreen,
+        #[label(tr! { "en" => "Episodes", "zh-Hans" => "选集" })]
+        Episodes,
+        #[label(tr! { "en" => "Playback info", "zh-Hans" => "播放信息" })]
+        Info,
+    }
+
+    /// 快进快退一次几秒。
+    #[value]
+    pub enum SeekStep {
+        #[label(tr! { "en" => "1 s", "zh-Hans" => "1 秒" })]
+        One,
+        #[label(tr! { "en" => "5 s", "zh-Hans" => "5 秒" })]
+        Five,
+        #[label(tr! { "en" => "10 s", "zh-Hans" => "10 秒" })]
+        Ten,
+        #[label(tr! { "en" => "15 s", "zh-Hans" => "15 秒" })]
+        Fifteen,
+        #[label(tr! { "en" => "30 s", "zh-Hans" => "30 秒" })]
+        Thirty,
+    }
+
+    /// 长按快进的倍速。
+    #[value]
+    pub enum HoldRate {
+        #[label(tr! { "en" => "1.5×", "zh-Hans" => "1.5×" })]
+        OneAndHalf,
+        #[label(tr! { "en" => "2.0×", "zh-Hans" => "2.0×" })]
+        Two,
+        #[label(tr! { "en" => "3.0×", "zh-Hans" => "3.0×" })]
+        Three,
+        #[label(tr! { "en" => "4.0×", "zh-Hans" => "4.0×" })]
+        Four,
+    }
+
+    /// 控制栏停留几秒。
+    #[value]
+    pub enum BarStay {
+        #[label(tr! { "en" => "1 s", "zh-Hans" => "1 秒" })]
+        One,
+        #[label(tr! { "en" => "2 s", "zh-Hans" => "2 秒" })]
+        Two,
+        #[label(tr! { "en" => "3 s", "zh-Hans" => "3 秒" })]
+        Three,
+        #[label(tr! { "en" => "5 s", "zh-Hans" => "5 秒" })]
+        Five,
+    }
+
+    /// 媒体库按观看状态筛选。
+    #[value]
+    pub enum LibraryFilter {
+        #[label(tr! { "en" => "All", "zh-Hans" => "全部" })]
+        All,
+        #[label(tr! { "en" => "Watching", "zh-Hans" => "在看" })]
+        Watching,
+        #[label(tr! { "en" => "Not started", "zh-Hans" => "没看" })]
+        Unwatched,
+        #[label(tr! { "en" => "Finished", "zh-Hans" => "看完" })]
+        Finished,
+    }
+
+    /// 媒体库的排序。
+    #[value]
+    pub enum LibrarySort {
+        #[label(tr! { "en" => "Recently added", "zh-Hans" => "最近加入" })]
+        Added,
+        #[label(tr! { "en" => "Name", "zh-Hans" => "名称" })]
+        Name,
+        #[label(tr! { "en" => "Recently watched", "zh-Hans" => "最近观看" })]
+        Watched,
+    }
+
+    /// 设置页里能恢复默认的一类。
+    #[value]
+    pub enum Section {
+        #[label(tr! { "en" => "Playback", "zh-Hans" => "播放" })]
+        Play,
+        #[label(tr! { "en" => "Picture", "zh-Hans" => "画面" })]
+        Picture,
+        #[label(tr! { "en" => "Danmaku", "zh-Hans" => "弹幕" })]
+        Danmaku,
+        #[label(tr! { "en" => "Shortcuts", "zh-Hans" => "快捷键" })]
+        Keys,
+    }
+
+    /// 关于页里的链接。
+    #[value]
+    pub enum Link {
+        #[label(tr! { "en" => "GitHub", "zh-Hans" => "GitHub" })]
+        Source,
+        #[label(tr! { "en" => "dandanplay", "zh-Hans" => "弹弹play" })]
+        Dandanplay,
+        #[label(tr! { "en" => "TMDB", "zh-Hans" => "TMDB" })]
+        Tmdb,
+        #[label(tr! { "en" => "bangumi-data", "zh-Hans" => "bangumi-data" })]
+        BangumiData,
+    }
+
+    /// 顶栏里的一页：开着就显示在顶栏上。
+    #[value]
+    pub struct NavItem {
+        pub id: i64,
+        pub page: Page,
+        pub on: bool,
+    }
+
+    /// 一个屏蔽词；写成 `/…/` 的是正则表达式。
+    #[value]
+    pub struct Word {
+        pub id: i64,
+        #[content]
+        pub text: String,
+    }
+
+    /// 每个操作的按键，按 Bern 的写法，例如 `shift+right`。
+    #[value]
+    pub struct Keys {
+        pub play: String,
+        pub rewind: String,
+        pub forward: String,
+        pub previous: String,
+        pub next: String,
+        pub skip: String,
+        pub faster: String,
+        pub slower: String,
+        pub normal_speed: String,
+        pub hold: String,
+        /// 长按快进键帽上写的键，例如“→”。
+        #[content]
+        pub hold_label: String,
+        pub louder: String,
+        pub quieter: String,
+        pub mute: String,
+        pub danmaku: String,
+        pub danmaku_panel: String,
+        pub subtitle: String,
+        pub audio: String,
+        pub fullscreen: String,
+        pub exit_fullscreen: String,
+        pub episodes: String,
+        pub info: String,
+    }
+
+    /// 播放页选集里的一集。
+    #[value]
+    pub struct PlayEpisode {
+        pub id: i64,
+        /// “第8话”。
+        #[content]
+        pub code: String,
+        #[content]
+        pub title: String,
+        pub thumb: MediaSource,
+        pub has_thumb: bool,
+        /// “已看完”“看到 35%”“正在播放”“未找到”，没看过时为空。
+        #[content]
+        pub note: String,
+        pub current: bool,
+        /// 本地有这一集的文件。
+        pub local: bool,
+        /// 看到一半时缩略图下面的进度，0 到 1；没看或看完时为 0。
+        pub bar: f64,
+    }
+
+    /// 播放信息的一行。
+    #[value]
+    pub struct InfoRow {
+        pub id: i64,
+        #[content]
+        pub key: String,
+        #[content]
+        pub value: String,
+    }
+
+    /// 字幕页的一条字幕轨。
+    #[value]
+    pub struct SubtitleRow {
+        /// mpv 的轨道编号。
+        pub id: i64,
+        /// “中文 (Subtitle track 0)”。
+        #[content]
+        pub name: String,
+        /// “语言：中文”，导入的写“导入的文件”。
+        #[content]
+        pub note: String,
+        pub on: bool,
+    }
+
+    /// 弹幕列表的一条。
+    #[value]
+    pub struct DanmakuLine {
+        pub id: i64,
+        /// 出现时间，`7:03`。
+        #[content]
+        pub time: String,
+        #[content]
+        pub text: String,
+        /// 离现在的播放位置最近的那一条。
+        pub now: bool,
+    }
+
+    /// 手动匹配时搜到的一部作品。
+    #[value]
+    pub struct MatchAnime {
+        pub id: i64,
+        #[content]
+        pub title: String,
+        /// “TV动画 · 12 话”。
+        #[content]
+        pub note: String,
+        pub chosen: bool,
+    }
+
+    /// 手动匹配时选中作品的一集。
+    #[value]
+    pub struct MatchEpisode {
+        pub id: i64,
+        #[content]
+        pub title: String,
+        pub chosen: bool,
     }
 
     #[state]
@@ -336,6 +764,15 @@ pub mod nkuplay {
         pub series: Vec<Series>,
         /// `series` 的个数。
         pub series_count: i64,
+        /// 媒体库页显示的番：按筛选和排序，编号和 `series` 里的一样。
+        pub library_shown: Vec<Series>,
+        pub library_filter: LibraryFilter,
+        pub library_sort: LibrarySort,
+        /// 各个筛选下有几部。
+        pub count_all: i64,
+        pub count_watching: i64,
+        pub count_unwatched: i64,
+        pub count_finished: i64,
         /// 还有文件夹在扫描或识别。
         pub library_scanning: bool,
 
@@ -415,6 +852,127 @@ pub mod nkuplay {
         pub detail_comment_source: String,
         pub detail_scores: Vec<DetailScore>,
         pub detail_facts: Vec<DetailFact>,
+        // ——设置（存在硬盘上）——
+        pub appearance: Appearance,
+        pub start_page: Page,
+        /// 顶栏的页面，按顺序；关着的也在里面。
+        pub nav: Vec<NavItem>,
+        /// 顶栏上显示的页面（开着的那些）。
+        pub nav_shown: Vec<NavItem>,
+        pub resume: bool,
+        pub auto_fullscreen: bool,
+        pub after_end: AfterEnd,
+        /// 下一话倒计时几秒。
+        pub countdown: f64,
+        pub skip_mode: SkipMode,
+        /// 按 S 往后跳几秒。
+        pub skip_seconds: f64,
+        /// 快进快退几秒。
+        pub seek_step: i64,
+        /// 长按快进的倍速，乘以 10（15、20、30、40）。
+        pub hold_speed: i64,
+        pub keep_pitch: bool,
+        /// 控制栏停留几秒。
+        pub bar_stay: i64,
+        /// 上面三项的档位，给选择器用。
+        pub seek_choice: SeekStep,
+        pub hold_choice: HoldRate,
+        pub stay_choice: BarStay,
+        pub chapter_marks: bool,
+        pub heat_curve: bool,
+        pub hover_preview: bool,
+        pub hwdec: bool,
+        /// 预缓存多少 MB。
+        pub cache_mb: f64,
+        pub upscale: Upscale,
+        pub aspect: Aspect,
+        pub fill: Fill,
+        /// 弹幕不透明度，10 到 100。
+        pub d_opacity: f64,
+        pub d_size: f64,
+        pub d_outline: f64,
+        pub d_font: DanmakuFont,
+        /// 显示区域，25 到 100。
+        pub d_area: f64,
+        pub d_seconds: f64,
+        /// 行距，0 到 50（字号的百分之几）。
+        pub d_gap: f64,
+        pub d_overlap: bool,
+        pub d_scroll: bool,
+        pub d_top: bool,
+        pub d_bottom: bool,
+        pub d_colored: bool,
+        pub d_merge: bool,
+        pub blocked: Vec<Word>,
+        pub blocked_count: i64,
+        pub keys: Keys,
+
+        // ——播放页——
+        /// 番名；没认出时是文件名。
+        #[content]
+        pub play_title: String,
+        /// “第7话 星期六10点，在琵琶湖露台”；没认出时为空。
+        #[content]
+        pub play_subtitle: String,
+        pub speed: f64,
+        /// “1.0×”。
+        #[content]
+        pub speed_text: String,
+        /// 正按住长按快进。
+        pub fast: bool,
+        pub has_previous: bool,
+        pub has_next: bool,
+        pub episodes: Vec<PlayEpisode>,
+        pub episode_count: i64,
+        /// 音量的百分数，0 到 100。
+        pub volume_percent: i64,
+        /// 每一章从哪里开始，0 到 1（第一章的 0 不算）。章节标记关着时为空。
+        pub chapters: Vec<f64>,
+        /// 弹幕热度，120 段，0 到 1。热度关着时为空。
+        pub heat: Vec<f64>,
+        /// 正在片头或片尾里，显示“跳过”按钮。
+        pub skip_shown: bool,
+        /// “到 2:09”。
+        #[content]
+        pub skip_label: String,
+        /// 片头或片尾：按钮上写“跳过片头”还是“跳过片尾”。
+        pub skip_outro: bool,
+        /// 下一话倒计时卡片。
+        pub next_shown: bool,
+        pub next_left: i64,
+        #[content]
+        pub next_code: String,
+        #[content]
+        pub next_title: String,
+        pub next_thumb: MediaSource,
+        pub next_has_thumb: bool,
+        pub info: Vec<InfoRow>,
+        /// 字幕页：视频里的字幕轨和导入的字幕文件。
+        pub subtitles: Vec<SubtitleRow>,
+        pub subtitle_count: i64,
+        /// 弹幕的时间偏移（秒），用户自己调的。
+        pub danmaku_shift: f64,
+        #[content]
+        pub danmaku_shift_text: String,
+        pub danmaku_lines: Vec<DanmakuLine>,
+        /// 弹幕从哪里来：“弹弹play”或文件名。
+        #[content]
+        pub danmaku_source: String,
+        pub danmaku_from_file: bool,
+        /// 悬停预览图：图片和它是第几秒的画面。没有时 `preview_ready` 为假。
+        pub preview: MediaSource,
+        pub preview_ready: bool,
+        // ——手动匹配——
+        pub match_open: bool,
+        #[content]
+        pub match_file: String,
+        pub match_busy: bool,
+        pub match_animes: Vec<MatchAnime>,
+        pub match_episodes: Vec<MatchEpisode>,
+        pub match_folder: bool,
+        pub match_ready: bool,
+        /// 刚打开的视频要自动全屏，还没进入。
+        pub fullscreen_pending: bool,
     }
 
     #[commands]
@@ -530,5 +1088,185 @@ pub mod nkuplay {
         /// 把编号为 `id` 的文件夹移出媒体库；不删除任何文件。
         #[idempotent]
         fn remove_folder(&mut self, id: i64) -> Result<(), CommandError>;
+        #[idempotent]
+        fn set_appearance(&mut self, appearance: Appearance) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_start_page(&mut self, page: Page) -> Result<(), CommandError>;
+
+        /// 顶栏显示或不显示这一页；至少留一页。
+        #[idempotent]
+        fn show_page(&mut self, page: Page, on: bool) -> Result<(), CommandError>;
+
+        /// 把顶栏第 `from` 个页面挪到第 `to` 个（从 0 数）。
+        fn move_page(&mut self, from: i64, to: i64) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_toggle(&mut self, toggle: Toggle, on: bool) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_amount(&mut self, amount: Amount, value: f64) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_seek_step(&mut self, step: SeekStep) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_hold_rate(&mut self, rate: HoldRate) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_bar_stay(&mut self, stay: BarStay) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_after_end(&mut self, after: AfterEnd) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_skip_mode(&mut self, mode: SkipMode) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_upscale(&mut self, upscale: Upscale) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_aspect(&mut self, aspect: Aspect) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_fill(&mut self, fill: Fill) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_danmaku_font(&mut self, font: DanmakuFont) -> Result<(), CommandError>;
+
+        /// 加一个屏蔽词；空的、重复的不加。
+        fn add_blocked(&mut self, text: String) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn remove_blocked(&mut self, id: i64) -> Result<(), CommandError>;
+
+        /// 换一个操作的按键；空的表示不用按键。
+        #[idempotent]
+        fn set_key(&mut self, action: KeyAction, keys: String) -> Result<(), CommandError>;
+
+        /// 这一类设置恢复默认。
+        fn reset_section(&mut self, section: Section) -> Result<(), CommandError>;
+
+        /// 用浏览器打开关于页里的链接。
+        fn open_link(&mut self, link: Link) -> Result<(), CommandError>;
+
+        /// 播放速度，0.25 到 4。
+        #[idempotent]
+        fn set_speed(&mut self, speed: f64) -> Result<(), CommandError>;
+
+        /// 在当前速度上加减。
+        fn nudge_speed(&mut self, step: f64) -> Result<(), CommandError>;
+
+        /// 按住长按快进键（为真）或松开。
+        #[idempotent]
+        fn set_fast(&mut self, fast: bool) -> Result<(), CommandError>;
+
+        /// 播放器每秒报一次位置：片头片尾按钮、自动跳过、播完以后都靠它。
+        fn tick(&mut self, position_ms: i64, duration_ms: Option<i64>) -> Result<(), CommandError>;
+
+        /// 跳过片头或片尾。
+        fn skip_part(&mut self) -> Result<(), CommandError>;
+
+        /// 往后跳“手动跳过”的秒数。
+        fn skip_ahead(
+            &mut self,
+            position_ms: i64,
+            duration_ms: Option<i64>,
+        ) -> Result<(), CommandError>;
+
+        fn play_previous(&mut self) -> Result<(), CommandError>;
+
+        fn play_next(&mut self) -> Result<(), CommandError>;
+
+        fn cancel_next(&mut self) -> Result<(), CommandError>;
+
+        /// 播放选集里的一集。
+        fn play_episode(&mut self, id: i64) -> Result<(), CommandError>;
+
+        fn cycle_subtitle(&mut self) -> Result<(), CommandError>;
+
+        fn cycle_audio(&mut self) -> Result<(), CommandError>;
+
+        fn add_subtitle(&mut self, file: MediaSource) -> Result<(), CommandError>;
+
+        /// 显示第 `id` 条字幕轨。
+        fn select_subtitle(&mut self, id: i64) -> Result<(), CommandError>;
+
+        /// 读一遍播放信息。
+        fn load_info(&mut self) -> Result<(), CommandError>;
+
+        /// 弹幕列表：`position_ms` 附近的弹幕，有 `query` 时是含有它的全部。
+        fn list_danmaku(&mut self, position_ms: i64, query: String) -> Result<(), CommandError>;
+
+        /// 屏蔽列表里的这一条（加成屏蔽词）。
+        fn block_line(&mut self, id: i64) -> Result<(), CommandError>;
+
+        /// 在弹幕时间偏移上加减（秒）。
+        fn nudge_shift(&mut self, step: f64) -> Result<(), CommandError>;
+
+        /// 重新获取这一集的弹幕。
+        fn refetch_danmaku(&mut self) -> Result<(), CommandError>;
+
+        /// 加载一个弹幕文件（弹弹play 的 xml 或 json）。
+        fn load_danmaku_file(&mut self, file: MediaSource) -> Result<(), CommandError>;
+
+        /// 悬停预览：鼠标在进度条的第几分之几处；负数表示移开了。
+        fn peek(&mut self, fraction: f64, duration_ms: Option<i64>) -> Result<(), CommandError>;
+
+        /// 打开手动匹配。
+        fn open_match(&mut self) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn close_match(&mut self) -> Result<(), CommandError>;
+
+        fn search_match(&mut self, query: String) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn choose_anime(&mut self, id: i64) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn choose_episode(&mut self, id: i64) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_match_folder(&mut self, on: bool) -> Result<(), CommandError>;
+
+        /// 按选好的那一集取弹幕，记住这个文件（勾选时连同文件夹里的其他集）是这部番。
+        fn confirm_match(&mut self) -> Result<(), CommandError>;
+
+        /// 这个文件不加载弹幕。
+        fn skip_danmaku(&mut self) -> Result<(), CommandError>;
+
+        /// 往前（负数）或往后跳几个“快进快退”的步长。
+        fn seek_steps(
+            &mut self,
+            steps: i64,
+            position_ms: i64,
+            duration_ms: Option<i64>,
+        ) -> Result<(), CommandError>;
+
+        /// 自动全屏已经进入全屏。
+        #[idempotent]
+        fn fullscreen_done(&mut self) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_library_filter(&mut self, filter: LibraryFilter) -> Result<(), CommandError>;
+
+        #[idempotent]
+        fn set_library_sort(&mut self, sort: LibrarySort) -> Result<(), CommandError>;
+
+        /// 接着看这部番：看到一半的那一集，或看完的下一集。
+        fn resume_series(&mut self, id: i64) -> Result<(), CommandError>;
+
+        /// 把这部番的每一集都记成看完。
+        fn finish_series(&mut self, id: i64) -> Result<(), CommandError>;
+
+        /// 从媒体库隐藏这部番（文件不动）。
+        fn hide_series(&mut self, id: i64) -> Result<(), CommandError>;
+
+        /// 忘掉这部番是哪部作品，重新问弹弹play。
+        fn reidentify_series(&mut self, id: i64) -> Result<(), CommandError>;
+
+        /// 在资源管理器里打开这部番所在的文件夹。
+        fn reveal_series(&mut self, id: i64) -> Result<(), CommandError>;
     }
 }

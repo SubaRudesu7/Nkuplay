@@ -9,7 +9,7 @@
 use bern::media::MediaSource;
 use nkuplay_dandanplay::{
     ChineseConversion, Client, Comment, CommentMode, Credentials, EpisodeMatch, Error, Fingerprint,
-    MatchRequest, MatchResult, fingerprint_reader,
+    MatchRequest, MatchResult, SearchedAnime, fingerprint_reader,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,11 +20,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// 一集的弹幕保留多久。
 pub const KEEP: Duration = Duration::from_secs(30 * 60);
 
-/// 弹弹play 的调用里引擎用到的那两个，测试时可以换成假的。
+/// 弹弹play 的调用里引擎用到的那几个，测试时可以换成假的。
 pub trait Api: Send + Sync {
     fn match_file(&self, request: &MatchRequest) -> Result<MatchResult, Error>;
     /// 某一集的全部弹幕，含弹弹play 从其他网站合并来的。
     fn comments(&self, episode_id: i64) -> Result<Vec<Comment>, Error>;
+    /// 按作品名搜作品和它的剧集；手动匹配用。
+    fn search(&self, _anime: &str) -> Result<Vec<SearchedAnime>, Error> {
+        Ok(Vec::new())
+    }
 }
 
 impl Api for Client {
@@ -35,6 +39,19 @@ impl Api for Client {
     fn comments(&self, episode_id: i64) -> Result<Vec<Comment>, Error> {
         Client::comments(self, episode_id, true, ChineseConversion::None)
     }
+
+    fn search(&self, anime: &str) -> Result<Vec<SearchedAnime>, Error> {
+        Client::search_episodes(self, anime, None)
+    }
+}
+
+/// 手动匹配时用户选的那一集。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    pub anime_id: i64,
+    pub anime_title: String,
+    pub episode_id: i64,
+    pub episode_title: String,
 }
 
 /// 一个视频的弹幕，以及它被识别成了哪一集。
@@ -147,6 +164,14 @@ impl StoredComments {
     }
 }
 
+/// 文件的指纹：读前 16 MiB。
+fn fingerprint_of(source: &MediaSource) -> Result<Fingerprint, String> {
+    let file = source.open().map_err(|error| error.message)?;
+    let size = file.len();
+    let name = source.file_name().unwrap_or_default();
+    fingerprint_reader(&name, file, size).map_err(|error| error.to_string())
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -235,6 +260,77 @@ impl Loader {
         }
     }
 
+    /// 重新取 `source` 的弹幕，不用缓存里的。会阻塞。
+    pub fn reload(&self, source: &MediaSource) -> Outcome {
+        let print = match fingerprint_of(source) {
+            Ok(print) => print,
+            Err(reason) => return Outcome::Failed(reason),
+        };
+        let episode = match self.episode(print) {
+            Ok(Some(episode)) => episode,
+            Ok(None) => return Outcome::NoMatch,
+            Err(reason) => return Outcome::Failed(reason),
+        };
+        self.loaded(episode, Duration::ZERO)
+    }
+
+    /// 按作品名搜作品；手动匹配用。会阻塞。
+    pub fn search(&self, anime: &str) -> Result<Vec<SearchedAnime>, String> {
+        self.api.search(anime).map_err(|error| error.to_string())
+    }
+
+    /// 记住 `source` 是用户选的这一集（以后打开不再问弹弹play），再取它的弹幕。会阻塞。
+    pub fn choose(&self, source: &MediaSource, choice: &Choice) -> Outcome {
+        if let Err(reason) = self.remember(source, choice) {
+            return Outcome::Failed(reason);
+        }
+        let episode = Episode {
+            episode_id: choice.episode_id,
+            anime_id: choice.anime_id,
+            anime_title: choice.anime_title.clone(),
+            episode_title: choice.episode_title.clone(),
+            shift: 0.0,
+            poster: None,
+        };
+        self.loaded(episode, KEEP)
+    }
+
+    /// 只记住 `source` 是这一集，不取弹幕：同一文件夹里的其他集跟着手动匹配时用。会阻塞。
+    pub fn remember(&self, source: &MediaSource, choice: &Choice) -> Result<(), String> {
+        let print = fingerprint_of(source)?;
+        let episode = Episode {
+            episode_id: choice.episode_id,
+            anime_id: choice.anime_id,
+            anime_title: choice.anime_title.clone(),
+            episode_title: choice.episode_title.clone(),
+            shift: 0.0,
+            poster: None,
+        };
+        self.write("match", &print.file_hash, &episode);
+        self.episodes
+            .lock()
+            .expect("episodes")
+            .insert(print.file_hash, episode);
+        Ok(())
+    }
+
+    /// 这一集的弹幕，连同它是哪一集。
+    fn loaded(&self, episode: Episode, keep: Duration) -> Outcome {
+        let comments = match self.episode_comments(episode.episode_id, keep) {
+            Ok(comments) => comments,
+            Err(reason) => return Outcome::Failed(reason),
+        };
+        Outcome::Loaded(Loaded {
+            episode_id: episode.episode_id,
+            anime_id: episode.anime_id,
+            anime_title: episode.anime_title,
+            episode_title: episode.episode_title,
+            shift: episode.shift,
+            poster: episode.poster,
+            comments,
+        })
+    }
+
     /// 为指纹是 `print` 的文件取弹幕。
     /// 只认出 `source` 是哪部作品，不取弹幕：媒体库的海报墙用。认不出时为空。
     /// 和开始播放时共用同一份识别缓存，认过的文件不再发请求。会阻塞。
@@ -261,19 +357,7 @@ impl Loader {
             Ok(None) => return Outcome::NoMatch,
             Err(reason) => return Outcome::Failed(reason),
         };
-        let comments = match self.episode_comments(episode.episode_id, KEEP) {
-            Ok(comments) => comments,
-            Err(reason) => return Outcome::Failed(reason),
-        };
-        Outcome::Loaded(Loaded {
-            episode_id: episode.episode_id,
-            anime_id: episode.anime_id,
-            anime_title: episode.anime_title,
-            episode_title: episode.episode_title,
-            shift: episode.shift,
-            poster: episode.poster,
-            comments,
-        })
+        self.loaded(episode, KEEP)
     }
 
     /// 文件是哪一集：先看内存和缓存文件，都没有才问弹弹play。

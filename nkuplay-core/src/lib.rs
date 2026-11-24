@@ -4,8 +4,11 @@ mod airtimes;
 mod danmaku;
 mod details;
 mod library;
+mod library_page;
 mod naming;
 mod picture;
+mod player;
+mod settings;
 mod shin;
 mod tmdb;
 
@@ -17,9 +20,10 @@ use library::Library;
 use nkuplay_dandanplay::{Comment, CommentMode};
 use nkuplay_mpv::{DanmakuComment, DanmakuMode};
 use nkuplay_protocol::nkuplay::{
-    self, Backdrop, DanmakuStatus, DayChip, DetailComment, DetailEpisode, DetailFact, DetailGroup,
-    DetailScore, DetailTag, Folder, HeroDot, HomeMark, Recent, Series, ShinAnime, ShinStatus,
-    State, Weekday,
+    self, AfterEnd, Amount, Appearance, Aspect, Backdrop, BarStay, DanmakuFont, DanmakuStatus,
+    DayChip, DetailComment, DetailEpisode, DetailFact, DetailGroup, DetailScore, DetailTag, Fill,
+    Folder, HeroDot, HoldRate, HomeMark, KeyAction, LibraryFilter, LibrarySort, Link, Page, Recent,
+    Section, SeekStep, Series, ShinAnime, ShinStatus, SkipMode, State, Toggle, Upscale, Weekday,
 };
 use shin::Season;
 use std::collections::{HashMap, HashSet};
@@ -57,6 +61,12 @@ enum Arrival {
     ShotLooks(Vec<(PathBuf, bool)>),
     /// 新番的播出时间。
     Airtimes(airtimes::Table),
+    /// 播放内核报回的章节和编码信息，带着发起时的 `generation`。
+    Media(u64, nkuplay_mpv::MediaInfo),
+    /// 播放页那部番的资料或一集缩略图取到了，带着发起时的 `generation`。
+    PlayImages(u64),
+    /// 手动匹配搜到的作品，带着发起时的 `generation`。
+    Searched(u64, Result<Vec<nkuplay_dandanplay::SearchedAnime>, String>),
 }
 
 /// 打开着的详情页。
@@ -181,7 +191,7 @@ fn fetch_images(
     }
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
@@ -271,6 +281,11 @@ pub struct NkuplayEngine {
     /// 最近一次要跳到的位置（毫秒）和请求的时刻。播放器跳过去、报回新位置要一点时间，
     /// 这段时间里连按方向键要在这个位置上接着加减，而不是在还没更新的位置上。
     last_seek: Option<(i64, Instant)>,
+    /// 设置，以及存它的文件夹（没有时不存）。
+    settings: settings::Settings,
+    settings_folder: Option<PathBuf>,
+    /// 播放页要记着的。
+    play: player::Play,
 }
 
 /// 上一次跳转之后多久以内，连按方向键接着上一次的目标算。
@@ -367,6 +382,8 @@ impl NkuplayEngine {
         run: fn(Job),
     ) -> Self {
         let library = store.load();
+        let settings_folder = store.folder().cloned();
+        let settings = settings::load(settings_folder.as_ref());
         let mut engine = Self {
             state: State {
                 has_video: false,
@@ -406,6 +423,13 @@ impl NkuplayEngine {
                 folder_count: 0,
                 series: Vec::new(),
                 series_count: 0,
+                library_shown: Vec::new(),
+                library_filter: LibraryFilter::All,
+                library_sort: LibrarySort::Added,
+                count_all: 0,
+                count_watching: 0,
+                count_unwatched: 0,
+                count_finished: 0,
                 library_scanning: false,
                 detail_open: false,
                 detail_title: String::new(),
@@ -448,6 +472,87 @@ impl NkuplayEngine {
                 detail_comment_source: String::new(),
                 detail_scores: Vec::new(),
                 detail_facts: Vec::new(),
+                // 设置的值在 `publish_settings` 里填。
+                appearance: Appearance::System,
+                start_page: Page::Home,
+                nav: Vec::new(),
+                nav_shown: Vec::new(),
+                resume: true,
+                auto_fullscreen: false,
+                after_end: AfterEnd::Next,
+                countdown: 10.0,
+                skip_mode: SkipMode::Button,
+                skip_seconds: 90.0,
+                seek_step: 5,
+                hold_speed: 20,
+                keep_pitch: true,
+                bar_stay: 1,
+                seek_choice: SeekStep::Five,
+                hold_choice: HoldRate::Two,
+                stay_choice: BarStay::One,
+                chapter_marks: true,
+                heat_curve: true,
+                hover_preview: true,
+                hwdec: true,
+                cache_mb: 150.0,
+                upscale: Upscale::Off,
+                aspect: Aspect::Auto,
+                fill: Fill::Fit,
+                d_opacity: 70.0,
+                d_size: 34.0,
+                d_outline: 2.0,
+                d_font: DanmakuFont::YaHei,
+                d_area: 85.0,
+                d_seconds: 8.0,
+                d_gap: 15.0,
+                d_overlap: false,
+                d_scroll: true,
+                d_top: true,
+                d_bottom: true,
+                d_colored: true,
+                d_merge: false,
+                blocked: Vec::new(),
+                blocked_count: 0,
+                keys: settings.keys(),
+                play_title: String::new(),
+                play_subtitle: String::new(),
+                speed: 1.0,
+                speed_text: "1.0×".into(),
+                fast: false,
+                has_previous: false,
+                has_next: false,
+                episodes: Vec::new(),
+                episode_count: 0,
+                volume_percent: 100,
+                chapters: Vec::new(),
+                heat: Vec::new(),
+                skip_shown: false,
+                skip_label: String::new(),
+                skip_outro: false,
+                next_shown: false,
+                next_left: 0,
+                next_code: String::new(),
+                next_title: String::new(),
+                next_thumb: no_source(),
+                next_has_thumb: false,
+                info: Vec::new(),
+                subtitles: Vec::new(),
+                subtitle_count: 0,
+                danmaku_shift: 0.0,
+                danmaku_shift_text: "0.0 秒".into(),
+                danmaku_lines: Vec::new(),
+                danmaku_source: String::new(),
+                danmaku_from_file: false,
+                preview: no_source(),
+                preview_ready: false,
+                match_open: false,
+                match_file: String::new(),
+                match_busy: false,
+                match_animes: Vec::new(),
+                match_episodes: Vec::new(),
+                match_folder: true,
+                match_ready: false,
+                fullscreen_pending: false,
             },
             danmaku,
             comments: Arc::from([]),
@@ -474,9 +579,14 @@ impl NkuplayEngine {
             results: channel(),
             run,
             last_seek: None,
+            settings,
+            settings_folder,
+            play: player::Play::default(),
         };
         engine.publish_library();
         engine.publish_shin();
+        engine.publish_settings();
+        engine.apply_settings();
         engine
     }
 
@@ -556,10 +666,13 @@ impl NkuplayEngine {
                 self.state.danmaku_anime = loaded.anime_title;
                 self.state.danmaku_episode = loaded.episode_title;
                 self.state.danmaku_count = loaded.comments.len() as i64;
-                nkuplay_mpv::set_danmaku(for_kernel(&loaded.comments), loaded.shift);
                 self.comments = loaded.comments;
+                self.danmaku_arrived(loaded.shift);
             }
-            Outcome::NoMatch => self.state.danmaku = DanmakuStatus::NoMatch,
+            Outcome::NoMatch => {
+                self.state.danmaku = DanmakuStatus::NoMatch;
+                self.publish_play();
+            }
             Outcome::Failed(reason) => {
                 self.state.danmaku = DanmakuStatus::Failed;
                 self.state.danmaku_error = reason;
@@ -767,23 +880,32 @@ impl NkuplayEngine {
         self.publish_hero();
         self.state.folder_count = self.state.folders.len() as i64;
 
+        // 隐藏了的番不上海报墙。
+        let hidden = self.library.hidden.clone();
         self.shelf = self.library.shelf();
+        self.shelf.retain(|item| !hidden.contains(&item.key));
         self.state.series = self
             .shelf
             .iter()
             .enumerate()
             .map(|(index, item)| {
                 let (poster, has_poster) = poster(item.poster.as_deref());
+                let watch = library_page::watch_of(item, &self.library.progress);
                 Series {
                     id: index as i64 + 1,
                     title: item.title.clone(),
                     poster,
                     has_poster,
                     episodes: item.episodes.len() as i64,
+                    watched_up_to: watch.up_to,
+                    finished: watch.finished,
+                    bar: watch.bar,
+                    resume_number: watch.resume_number,
                 }
             })
             .collect();
         self.state.series_count = self.state.series.len() as i64;
+        self.publish_library_page();
         self.state.library_scanning = !self.scanning.is_empty();
         self.publish_detail();
     }
@@ -1384,9 +1506,14 @@ impl nkuplay::Commands for NkuplayEngine {
         self.state.has_video = true;
         let name = file.file_name().unwrap_or_default();
         self.library.opened(&file.url, &name);
+        self.begin_play(&file.url);
         // 看到一半的接着播：在界面让播放器打开之前告诉播放内核从哪里开始。
         match self.library.progress.get(&file.url) {
-            Some(watched) if !watched.finished() && watched.position_ms > RESUME_FROM => {
+            Some(watched)
+                if self.settings.resume
+                    && !watched.finished()
+                    && watched.position_ms > RESUME_FROM =>
+            {
                 nkuplay_mpv::start_at(&file.url, watched.position_ms - RESUME_REWIND);
             }
             _ => nkuplay_mpv::no_start(),
@@ -1405,6 +1532,12 @@ impl nkuplay::Commands for NkuplayEngine {
         self.state.has_video = false;
         self.last_seek = None;
         self.reset_danmaku(DanmakuStatus::Off);
+        self.state.next_shown = false;
+        self.state.skip_shown = false;
+        self.state.match_open = false;
+        if self.state.fast {
+            self.set_fast_to(false);
+        }
         Ok(())
     }
 
@@ -1433,6 +1566,7 @@ impl nkuplay::Commands for NkuplayEngine {
     fn set_volume(&mut self, volume: f64) -> Result<(), CommandError> {
         self.state.volume = volume_of(volume)
             .ok_or_else(|| CommandError::new("invalid_volume", "the volume must be a number"))?;
+        self.state.volume_percent = (self.state.volume * 100.0).round() as i64;
         Ok(())
     }
 
@@ -1719,6 +1853,340 @@ impl nkuplay::Commands for NkuplayEngine {
         }
         Ok(())
     }
+
+    fn set_appearance(&mut self, appearance: Appearance) -> Result<(), CommandError> {
+        self.edit_settings(|s| s.appearance = settings::appearance_name(&appearance).into());
+        Ok(())
+    }
+
+    fn set_start_page(&mut self, page: Page) -> Result<(), CommandError> {
+        self.edit_settings(|s| s.start_page = settings::page_name(&page).into());
+        Ok(())
+    }
+
+    fn show_page(&mut self, page: Page, on: bool) -> Result<(), CommandError> {
+        self.edit_settings(|s| s.show_page(&page, on));
+        Ok(())
+    }
+
+    fn move_page(&mut self, from: i64, to: i64) -> Result<(), CommandError> {
+        self.edit_settings(|s| s.move_page(from, to));
+        Ok(())
+    }
+
+    fn set_toggle(&mut self, toggle: Toggle, on: bool) -> Result<(), CommandError> {
+        self.edit_settings(|s| *s.toggle(&toggle) = on);
+        Ok(())
+    }
+
+    fn set_amount(&mut self, amount: Amount, value: f64) -> Result<(), CommandError> {
+        if !value.is_finite() {
+            return Err(CommandError::new(
+                "invalid_value",
+                "the value must be a number",
+            ));
+        }
+        self.edit_settings(|s| s.set_amount(&amount, value));
+        Ok(())
+    }
+
+    fn set_seek_step(&mut self, step: SeekStep) -> Result<(), CommandError> {
+        let seconds = match step {
+            SeekStep::One => 1,
+            SeekStep::Five => 5,
+            SeekStep::Ten => 10,
+            SeekStep::Fifteen => 15,
+            SeekStep::Thirty => 30,
+        };
+        self.edit_settings(|s| s.seek_step = seconds);
+        Ok(())
+    }
+
+    fn set_hold_rate(&mut self, rate: HoldRate) -> Result<(), CommandError> {
+        let tenths = match rate {
+            HoldRate::OneAndHalf => 15,
+            HoldRate::Two => 20,
+            HoldRate::Three => 30,
+            HoldRate::Four => 40,
+        };
+        self.edit_settings(|s| s.hold_speed = tenths);
+        Ok(())
+    }
+
+    fn set_bar_stay(&mut self, stay: BarStay) -> Result<(), CommandError> {
+        let seconds = match stay {
+            BarStay::One => 1,
+            BarStay::Two => 2,
+            BarStay::Three => 3,
+            BarStay::Five => 5,
+        };
+        self.edit_settings(|s| s.bar_stay = seconds);
+        Ok(())
+    }
+
+    fn set_after_end(&mut self, after: AfterEnd) -> Result<(), CommandError> {
+        self.edit_settings(|s| s.after_end = settings::after_end_name(&after).into());
+        Ok(())
+    }
+
+    fn set_skip_mode(&mut self, mode: SkipMode) -> Result<(), CommandError> {
+        self.edit_settings(|s| s.skip_mode = settings::skip_mode_name(&mode).into());
+        Ok(())
+    }
+
+    fn set_upscale(&mut self, upscale: Upscale) -> Result<(), CommandError> {
+        self.edit_settings(|s| s.upscale = settings::upscale_name(&upscale).into());
+        Ok(())
+    }
+
+    fn set_aspect(&mut self, aspect: Aspect) -> Result<(), CommandError> {
+        self.edit_settings(|s| s.aspect = settings::aspect_name(&aspect).into());
+        Ok(())
+    }
+
+    fn set_fill(&mut self, fill: Fill) -> Result<(), CommandError> {
+        self.edit_settings(|s| s.fill = settings::fill_name(&fill).into());
+        Ok(())
+    }
+
+    fn set_danmaku_font(&mut self, font: DanmakuFont) -> Result<(), CommandError> {
+        self.edit_settings(|s| s.d_font = settings::font_name(&font).into());
+        Ok(())
+    }
+
+    fn add_blocked(&mut self, text: String) -> Result<(), CommandError> {
+        if self.settings.add_blocked(&text) {
+            self.settings_changed();
+        }
+        Ok(())
+    }
+
+    fn remove_blocked(&mut self, id: i64) -> Result<(), CommandError> {
+        if (0..self.settings.blocked.len() as i64).contains(&id) {
+            self.edit_settings(|s| {
+                s.blocked.remove(id as usize);
+            });
+        }
+        Ok(())
+    }
+
+    fn set_key(&mut self, action: KeyAction, keys: String) -> Result<(), CommandError> {
+        let keys = if keys.trim().is_empty() {
+            String::new()
+        } else {
+            bern::shortcut::parse_shortcut(&keys)
+                .map_err(|reason| CommandError::new("invalid_shortcut", reason.to_string()))?
+                .to_string()
+        };
+        self.edit_settings(|s| s.set_key(&action, &keys));
+        Ok(())
+    }
+
+    fn reset_section(&mut self, section: Section) -> Result<(), CommandError> {
+        self.edit_settings(|s| s.reset(&section));
+        Ok(())
+    }
+
+    fn open_link(&mut self, link: Link) -> Result<(), CommandError> {
+        self.open_link_at(&link)
+    }
+
+    fn set_speed(&mut self, speed: f64) -> Result<(), CommandError> {
+        self.set_speed_to(speed)
+    }
+
+    fn nudge_speed(&mut self, step: f64) -> Result<(), CommandError> {
+        self.set_speed_to(self.state.speed + step)
+    }
+
+    fn set_fast(&mut self, fast: bool) -> Result<(), CommandError> {
+        self.set_fast_to(fast);
+        Ok(())
+    }
+
+    fn tick(&mut self, position_ms: i64, duration_ms: Option<i64>) -> Result<(), CommandError> {
+        self.tick_at(position_ms, duration_ms);
+        Ok(())
+    }
+
+    fn skip_part(&mut self) -> Result<(), CommandError> {
+        self.skip_part_now();
+        Ok(())
+    }
+
+    fn skip_ahead(
+        &mut self,
+        position_ms: i64,
+        duration_ms: Option<i64>,
+    ) -> Result<(), CommandError> {
+        let seconds = self.settings.skip_seconds;
+        self.skip_at(seconds, position_ms, duration_ms, Instant::now())
+    }
+
+    fn play_previous(&mut self) -> Result<(), CommandError> {
+        self.play_offset(-1)
+    }
+
+    fn play_next(&mut self) -> Result<(), CommandError> {
+        self.play_offset(1)
+    }
+
+    fn cancel_next(&mut self) -> Result<(), CommandError> {
+        self.cancel_next_now();
+        Ok(())
+    }
+
+    fn play_episode(&mut self, id: i64) -> Result<(), CommandError> {
+        self.play_row(id)
+    }
+
+    fn cycle_subtitle(&mut self) -> Result<(), CommandError> {
+        nkuplay_mpv::command(&["cycle", "sub"]);
+        self.load_info_now();
+        Ok(())
+    }
+
+    fn cycle_audio(&mut self) -> Result<(), CommandError> {
+        nkuplay_mpv::command(&["cycle", "audio"]);
+        Ok(())
+    }
+
+    fn add_subtitle(&mut self, file: MediaSource) -> Result<(), CommandError> {
+        let location = nkuplay_mpv::location(&file.url);
+        nkuplay_mpv::command(&["sub-add", &location, "select"]);
+        // 字幕页的列表跟着加上这一条。
+        self.load_info_now();
+        Ok(())
+    }
+
+    fn select_subtitle(&mut self, id: i64) -> Result<(), CommandError> {
+        nkuplay_mpv::select_subtitle(Some(id));
+        self.load_info_now();
+        Ok(())
+    }
+
+    fn load_info(&mut self) -> Result<(), CommandError> {
+        self.load_info_now();
+        Ok(())
+    }
+
+    fn list_danmaku(&mut self, position_ms: i64, query: String) -> Result<(), CommandError> {
+        self.list_danmaku_at(position_ms, &query);
+        Ok(())
+    }
+
+    fn block_line(&mut self, id: i64) -> Result<(), CommandError> {
+        self.block_line_now(id);
+        Ok(())
+    }
+
+    fn nudge_shift(&mut self, step: f64) -> Result<(), CommandError> {
+        self.nudge_shift_by(step);
+        Ok(())
+    }
+
+    fn refetch_danmaku(&mut self) -> Result<(), CommandError> {
+        self.refetch();
+        Ok(())
+    }
+
+    fn load_danmaku_file(&mut self, file: MediaSource) -> Result<(), CommandError> {
+        self.load_file_comments(&file)
+    }
+
+    fn peek(&mut self, _fraction: f64, _duration_ms: Option<i64>) -> Result<(), CommandError> {
+        // 悬停预览图还没做：要另开一个播放内核取帧。
+        Ok(())
+    }
+
+    fn open_match(&mut self) -> Result<(), CommandError> {
+        self.open_match_now();
+        Ok(())
+    }
+
+    fn close_match(&mut self) -> Result<(), CommandError> {
+        self.state.match_open = false;
+        Ok(())
+    }
+
+    fn search_match(&mut self, query: String) -> Result<(), CommandError> {
+        self.search_match_for(&query);
+        Ok(())
+    }
+
+    fn choose_anime(&mut self, id: i64) -> Result<(), CommandError> {
+        self.choose_anime_now(id);
+        Ok(())
+    }
+
+    fn choose_episode(&mut self, id: i64) -> Result<(), CommandError> {
+        self.choose_episode_now(id);
+        Ok(())
+    }
+
+    fn set_match_folder(&mut self, on: bool) -> Result<(), CommandError> {
+        self.state.match_folder = on;
+        Ok(())
+    }
+
+    fn confirm_match(&mut self) -> Result<(), CommandError> {
+        self.confirm_match_now();
+        Ok(())
+    }
+
+    fn skip_danmaku(&mut self) -> Result<(), CommandError> {
+        self.skip_danmaku_now();
+        Ok(())
+    }
+
+    fn seek_steps(
+        &mut self,
+        steps: i64,
+        position_ms: i64,
+        duration_ms: Option<i64>,
+    ) -> Result<(), CommandError> {
+        let seconds = steps as f64 * self.settings.seek_step as f64;
+        self.skip_at(seconds, position_ms, duration_ms, Instant::now())
+    }
+
+    fn fullscreen_done(&mut self) -> Result<(), CommandError> {
+        self.state.fullscreen_pending = false;
+        Ok(())
+    }
+
+    fn set_library_filter(&mut self, filter: LibraryFilter) -> Result<(), CommandError> {
+        self.state.library_filter = filter;
+        self.publish_library_page();
+        Ok(())
+    }
+
+    fn set_library_sort(&mut self, sort: LibrarySort) -> Result<(), CommandError> {
+        self.edit_settings(|s| s.library_sort = settings::library_sort_name(&sort).into());
+        self.publish_library_page();
+        Ok(())
+    }
+
+    fn resume_series(&mut self, id: i64) -> Result<(), CommandError> {
+        let url = self.resume_url(id)?;
+        <Self as nkuplay::Commands>::open_file(self, MediaSource::new(&url))
+    }
+
+    fn finish_series(&mut self, id: i64) -> Result<(), CommandError> {
+        self.finish_series_at(id)
+    }
+
+    fn hide_series(&mut self, id: i64) -> Result<(), CommandError> {
+        self.hide_series_at(id)
+    }
+
+    fn reidentify_series(&mut self, id: i64) -> Result<(), CommandError> {
+        self.reidentify_series_at(id)?;
+        <Self as nkuplay::Commands>::refresh_library(self)
+    }
+
+    fn reveal_series(&mut self, id: i64) -> Result<(), CommandError> {
+        self.reveal_series_at(id)
+    }
 }
 
 impl nkuplay::Engine for NkuplayEngine {
@@ -1735,6 +2203,8 @@ impl nkuplay::Engine for NkuplayEngine {
                         self.take_in(outcome);
                     }
                 }
+                Arrival::Media(generation, info) => self.take_media(generation, info),
+                Arrival::Searched(generation, found) => self.take_search(generation, found),
                 Arrival::Shin(Ok(season)) => self.take_season(season),
                 Arrival::Shin(Err(reason)) => {
                     // 取失败时，之前的列表（如果有）照旧显示。
@@ -1820,6 +2290,11 @@ impl nkuplay::Engine for NkuplayEngine {
                     {
                         detail.thumbs.insert(episode, path);
                         self.publish_detail();
+                    }
+                }
+                Arrival::PlayImages(generation) => {
+                    if generation == self.generation && self.state.has_video {
+                        self.publish_play();
                     }
                 }
                 Arrival::HomeStills => {

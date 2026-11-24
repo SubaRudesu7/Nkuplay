@@ -22,6 +22,49 @@ inline xaml::FrameworkElement build(Props const& props, Actions const& actions, 
     surface.HorizontalAlignment(xaml::HorizontalAlignment::Stretch);
     surface.VerticalAlignment(xaml::VerticalAlignment::Stretch);
     xaml::Automation::AutomationProperties::SetName(surface, props.label());
+    // 画面拿键盘焦点：焦点停在某个按钮上时，空格会按下那个按钮（甚至是播放页底下看不见的首页按钮），
+    // 而不是暂停或继续。打开视频时和点画面时都把焦点拿回来；画面本身不画焦点框。
+    // Grid 是面板，拿不了焦点，外面套一层 ContentControl 来拿。
+    controls::ContentControl host;
+    host.Content(surface);
+    host.IsTabStop(true);
+    host.UseSystemFocusVisuals(false);
+    host.HorizontalAlignment(xaml::HorizontalAlignment::Stretch);
+    host.VerticalAlignment(xaml::VerticalAlignment::Stretch);
+    host.HorizontalContentAlignment(xaml::HorizontalAlignment::Stretch);
+    host.VerticalContentAlignment(xaml::VerticalAlignment::Stretch);
+    host.Loaded([](IInspectable const& sender, auto&&) {
+        sender.as<controls::ContentControl>().Focus(xaml::FocusState::Programmatic);
+    });
+    surface.PointerPressed([weak = winrt::make_weak(host)](auto&&, auto&&) {
+        if (auto host = weak.get()) host.Focus(xaml::FocusState::Pointer);
+    });
+    // 点过底栏的按钮后焦点留在按钮上；暂停和继续换按钮、上下栏收起、进出全屏时那个按钮会被拆掉，
+    // 焦点就落到别处去了。这几样真的变了时，焦点回到画面上。
+    // 只看值有没有变：界面每次推送状态这里都会重跑，值没变也抢焦点的话，正按着的按钮会丢焦点、
+    // 这一下点击作废（播放时每秒都有推送）。上下栏叫出来时不拿；鼠标键按着时也不拿。
+    struct Seen {
+        bool playing = false, idle = false, fullscreen = false, first = true;
+    };
+    auto seen = std::make_shared<Seen>();
+    Reactive::Run([props, seen, weak = winrt::make_weak(host)] {
+        bool playing = props.playing();
+        bool idle = props.idle();
+        bool fullscreen = props.fullscreen();
+        Reactive::Untrack([&] {
+            bool changed = !seen->first && (playing != seen->playing || fullscreen != seen->fullscreen || (idle && !seen->idle));
+            *seen = Seen{playing, idle, fullscreen, false};
+            if (!changed) return 0;
+            if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000)) return 0;
+            auto host = weak.get();
+            if (!host || !host.XamlRoot()) return 0;
+            // 正在面板里打字（屏蔽词、搜索）时不抢焦点。
+            auto focused = xaml::Input::FocusManager::GetFocusedElement(host.XamlRoot());
+            if (focused && (focused.try_as<controls::TextBox>() || focused.try_as<controls::AutoSuggestBox>())) return 0;
+            host.Focus(xaml::FocusState::Programmatic);
+            return 0;
+        });
+    });
 
     auto state = std::make_shared<GestureState>();
     auto toggle = [props, actions] {
@@ -62,5 +105,5 @@ inline xaml::FrameworkElement build(Props const& props, Actions const& actions, 
     // 视频页拆掉时停下计时器，也让计时器活到那时。
     Reactive::OnCleanup([wait] { wait.Stop(); });
 
-    return surface;
+    return host;
 }

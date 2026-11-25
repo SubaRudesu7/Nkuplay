@@ -60,6 +60,14 @@ enum Message {
     StartAt(Option<(String, i64)>),
     /// 把正在显示的这一帧画面（不含字幕和弹幕）存成图片，存好了（或没能存）回话。
     Snapshot(PathBuf, Sender<bool>),
+    /// 换弹幕的显示方式：按新的设置重新整理当前这一集。
+    DanmakuConfig(Config),
+    /// 执行一条 mpv 命令，例如 `sub-add <文件> select`；失败只记日志。
+    Command(Vec<CString>),
+    /// 设一个 mpv 属性，值按字符串写，例如 `speed` 为 `1.5`。
+    Property(CString, CString),
+    /// 读出正在播放的视频的章节和编码信息，回话。
+    Info(Sender<crate::MediaInfo>),
     /// 应用要退出了：关掉 mpv，结束内核线程，然后回话。
     Shutdown(Sender<()>),
 }
@@ -94,6 +102,42 @@ pub fn start_at(start: Option<(String, i64)>) {
     if let Some(kernel) = KERNEL.get() {
         kernel.send(Message::StartAt(start));
     }
+}
+
+/// 换弹幕的显示方式；没有内核时什么也不做。
+pub fn set_danmaku_config(config: Config) {
+    if let Some(kernel) = KERNEL.get() {
+        kernel.send(Message::DanmakuConfig(config));
+    }
+}
+
+/// 执行一条 mpv 命令；有 NUL 的词或没有内核时什么也不做。
+pub fn command(words: &[&str]) {
+    let Some(kernel) = KERNEL.get() else {
+        return;
+    };
+    let words: Option<Vec<CString>> = words.iter().map(|word| CString::new(*word).ok()).collect();
+    if let Some(words) = words.filter(|words| !words.is_empty()) {
+        kernel.send(Message::Command(words));
+    }
+}
+
+/// 设一个 mpv 属性；没有内核时什么也不做。
+pub fn set_property(name: &str, value: &str) {
+    let Some(kernel) = KERNEL.get() else {
+        return;
+    };
+    if let (Ok(name), Ok(value)) = (CString::new(name), CString::new(value)) {
+        kernel.send(Message::Property(name, value));
+    }
+}
+
+/// 请内核读出播放信息，从交回的通道回话；没有内核时为空。
+pub fn media_info() -> Option<Receiver<crate::MediaInfo>> {
+    let kernel = KERNEL.get()?;
+    let (done, finished) = channel();
+    kernel.send(Message::Info(done));
+    Some(finished)
 }
 
 /// 请内核把正在显示的画面存到 `path`（JPEG）。请求马上排进内核的队列（排在之后的打开前面），
@@ -263,6 +307,10 @@ struct Worker {
     /// 正在显示视频的表面的像素尺寸。
     canvas: (u32, u32),
     danmaku: Option<Danmaku>,
+    /// 这一集原来的弹幕和时间偏移：换显示方式时按它重新整理。
+    danmaku_source: Option<(Vec<Comment>, f64)>,
+    /// 弹幕的显示方式。
+    danmaku_config: Config,
     danmaku_visible: bool,
     /// 下一次打开这个地址时从哪里（毫秒）开始播。
     start_at: Option<(String, i64)>,
@@ -298,6 +346,10 @@ impl Worker {
         option(c"input-vo-keyboard", c"no");
         // 文件播完后停在最后一帧；没有文件时也保持运行。
         option(c"keep-open", c"yes");
+        // 默认用视频自带的字幕：优先简体中文、再繁体；都没有时也选第一条
+        // （很多压制组的字幕轨不标“默认”，mpv 本来就一条都不选）。
+        option(c"slang", c"zh-Hans,zh-CN,chs,sc,zh,zho,chi,zh-Hant,zh-TW,cht,tc");
+        option(c"subs-fallback", c"yes");
         // 继续播放卡片上的画面：存成 JPEG，小一些。
         option(c"screenshot-format", c"jpg");
         option(c"screenshot-jpeg-quality", c"85");
@@ -366,6 +418,8 @@ impl Worker {
             redraw: false,
             canvas: (0, 0),
             danmaku: None,
+            danmaku_source: None,
+            danmaku_config: Config::default(),
             danmaku_visible: true,
             start_at: None,
         })
@@ -447,16 +501,45 @@ impl Worker {
                 self.draw();
             }
             Message::Danmaku(danmaku) => {
-                self.clear_danmaku_overlay();
-                self.danmaku = danmaku.map(|(comments, shift)| {
-                    let track = Track::new(&comments, shift, Config::default(), &Measure::system());
-                    Danmaku {
-                        track: Arc::new(track),
-                        layout: None,
-                        clock: Clock::new(),
-                        shown: String::new(),
-                    }
-                });
+                self.danmaku_source = danmaku;
+                self.rebuild_danmaku();
+            }
+            Message::DanmakuConfig(config) => {
+                if config != self.danmaku_config {
+                    self.danmaku_config = config;
+                    self.rebuild_danmaku();
+                }
+            }
+            Message::Command(words) => {
+                let words: Vec<&CStr> = words.iter().map(CString::as_c_str).collect();
+                if let Err(error) = self.command(&words) {
+                    eprintln!("nkuplay-mpv: {}", error.message);
+                }
+                self.redraw = true;
+            }
+            Message::Property(name, value) => {
+                // SAFETY: 两个字符串都以 NUL 结尾，并且在调用期间一直有效。
+                let code = unsafe {
+                    let mut text = value.as_ptr();
+                    (self.mpv.set_property)(
+                        self.handle,
+                        name.as_ptr(),
+                        sys::FORMAT_STRING,
+                        (&raw mut text).cast(),
+                    )
+                };
+                if code < 0 {
+                    eprintln!(
+                        "nkuplay-mpv: {} = {} was refused: {}",
+                        name.to_string_lossy(),
+                        value.to_string_lossy(),
+                        self.mpv.error_text(code)
+                    );
+                }
+                self.redraw = true;
+            }
+            Message::Info(done) => {
+                let _ = done.send(self.info());
             }
             Message::DanmakuVisible(visible) => {
                 self.danmaku_visible = visible;
@@ -541,6 +624,106 @@ impl Worker {
                 self.redraw = true;
             }
             Err(error) => eprintln!("nkuplay-mpv: {}", error.message),
+        }
+    }
+
+    /// 按现在的显示方式重新整理这一集的弹幕；没有弹幕时去掉。
+    fn rebuild_danmaku(&mut self) {
+        self.clear_danmaku_overlay();
+        self.danmaku = self.danmaku_source.as_ref().map(|(comments, shift)| {
+            let config = self.danmaku_config.clone();
+            let measure = Measure::for_font(&config.font);
+            Danmaku {
+                track: Arc::new(Track::new(comments, *shift, config, &measure)),
+                layout: None,
+                clock: Clock::new(),
+                shown: String::new(),
+            }
+        });
+    }
+
+    /// mpv 的一个属性，按字符串读；读不到或为空时为空。
+    fn text(&self, name: &str) -> Option<String> {
+        let name = CString::new(name).ok()?;
+        // SAFETY: `handle` 仍存活；返回的字符串由 mpv 分配，用完交还给 `mpv_free`。
+        let text = unsafe {
+            let raw = (self.mpv.get_property_string)(self.handle, name.as_ptr());
+            if raw.is_null() {
+                return None;
+            }
+            let text = CStr::from_ptr(raw).to_string_lossy().into_owned();
+            (self.mpv.free)(raw.cast());
+            text
+        };
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// `track-list` 里的字幕轨。
+    fn subtitles(&self) -> Vec<crate::SubtitleTrack> {
+        let count = self
+            .text("track-list/count")
+            .and_then(|text| text.parse::<usize>().ok())
+            .unwrap_or(0);
+        (0..count)
+            .filter(|index| self.text(&format!("track-list/{index}/type")).as_deref() == Some("sub"))
+            .filter_map(|index| {
+                let id = self.text(&format!("track-list/{index}/id"))?.parse().ok()?;
+                let flag = |name: &str| self.text(&format!("track-list/{index}/{name}")).as_deref() == Some("yes");
+                Some(crate::SubtitleTrack {
+                    id,
+                    title: self.text(&format!("track-list/{index}/title")),
+                    language: self.text(&format!("track-list/{index}/lang")),
+                    selected: flag("selected"),
+                    external: flag("external"),
+                })
+            })
+            .collect()
+    }
+
+    /// 正在播放的视频的章节和编码信息。
+    fn info(&self) -> crate::MediaInfo {
+        if !self.loaded {
+            return crate::MediaInfo::default();
+        }
+        let number = |name: &str| self.text(name).and_then(|text| text.parse::<f64>().ok());
+        let count = number("chapter-list/count").unwrap_or(0.0) as usize;
+        let chapters = (0..count)
+            .filter_map(|index| {
+                let time = number(&format!("chapter-list/{index}/time"))?;
+                let title = self
+                    .text(&format!("chapter-list/{index}/title"))
+                    .unwrap_or_default();
+                Some((time, title))
+            })
+            .collect();
+        crate::MediaInfo {
+            chapters,
+            video_codec: self
+                .text("video-format")
+                .or_else(|| self.text("video-codec")),
+            width: number("width").unwrap_or(0.0) as u32,
+            height: number("height").unwrap_or(0.0) as u32,
+            fps: number("container-fps"),
+            video_bitrate: number("video-bitrate"),
+            // 硬件解码时 `pixelformat` 是 `d3d11`，真正的格式在 `hw-pixelformat` 里。
+            pixel_format: self
+                .text("video-params/hw-pixelformat")
+                .or_else(|| self.text("video-params/pixelformat")),
+            color_matrix: self.text("video-params/colormatrix"),
+            gamma: self.text("video-params/gamma"),
+            decoder: self.text("hwdec-current"),
+            audio_codec: self.text("audio-codec-name"),
+            channels: number("audio-params/channel-count").map(|count| count as u32),
+            sample_rate: number("audio-params/samplerate").map(|rate| rate as u32),
+            audio_bitrate: number("audio-bitrate"),
+            subtitle_codec: self.text("current-tracks/sub/codec"),
+            subtitle_language: self
+                .text("current-tracks/sub/title")
+                .or_else(|| self.text("current-tracks/sub/lang")),
+            subtitles: self.subtitles(),
+            file_format: self.text("file-format"),
+            file_size: number("file-size").map(|size| size as u64),
+            dropped_frames: number("frame-drop-count").map_or(0, |count| count as u64),
         }
     }
 

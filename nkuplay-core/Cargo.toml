@@ -21,3 +21,5 @@ serde_json = "1"
 regex = "1"
 # 向 TMDB 取剧照。
 ureq = "3"
+# 看离开时的画面是不是全黑。
+zune-jpeg = "0.5"

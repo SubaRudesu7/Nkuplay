@@ -17,7 +17,104 @@ mod kernel;
 mod sys;
 mod url;
 
-pub use nkuplay_danmaku::{Comment as DanmakuComment, Mode as DanmakuMode};
+pub use nkuplay_danmaku::{
+    Comment as DanmakuComment, Config as DanmakuConfig, FONTS as DANMAKU_FONTS, Mode as DanmakuMode,
+};
+
+/// 正在播放的视频的章节和编码信息；没有打开视频时都为空。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MediaInfo {
+    /// 每一章从第几秒开始、叫什么，按时间排。
+    pub chapters: Vec<(f64, String)>,
+    pub video_codec: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub fps: Option<f64>,
+    /// 比特每秒。
+    pub video_bitrate: Option<f64>,
+    pub pixel_format: Option<String>,
+    pub color_matrix: Option<String>,
+    /// 传递函数，例如 `bt.1886`、`pq`。
+    pub gamma: Option<String>,
+    /// 正在用的硬件解码，例如 `d3d11va`；软件解码时为空。
+    pub decoder: Option<String>,
+    pub audio_codec: Option<String>,
+    pub channels: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub audio_bitrate: Option<f64>,
+    pub subtitle_codec: Option<String>,
+    pub subtitle_language: Option<String>,
+    /// 视频里的字幕轨和导入的字幕文件，按 mpv 的顺序。
+    pub subtitles: Vec<SubtitleTrack>,
+    pub file_format: Option<String>,
+    /// 字节。
+    pub file_size: Option<u64>,
+    pub dropped_frames: u64,
+}
+
+/// 一条字幕轨。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SubtitleTrack {
+    /// mpv 的轨道编号（`sid`）。
+    pub id: i64,
+    pub title: Option<String>,
+    /// 语言代码，例如 `chi`、`eng`。
+    pub language: Option<String>,
+    /// 正在显示的那一条。
+    pub selected: bool,
+    /// 用户导入的字幕文件。
+    pub external: bool,
+}
+
+/// 显示第 `id` 条字幕轨；`None` 时不显示字幕。没有内核时什么也不做。
+pub fn select_subtitle(id: Option<i64>) {
+    match id {
+        Some(id) => set_property("sid", &id.to_string()),
+        None => set_property("sid", "no"),
+    }
+}
+
+/// 一个地址交给 mpv 时的写法：本机文件是路径，其他照原样。
+pub fn location(url: &str) -> String {
+    url::to_mpv_location(url)
+}
+
+/// 换弹幕的显示方式：当前这一集按新的设置重新排。没有装上 libmpv 内核时什么也不做。
+pub fn set_danmaku_config(config: DanmakuConfig) {
+    #[cfg(windows)]
+    kernel::set_danmaku_config(config);
+    #[cfg(not(windows))]
+    let _ = config;
+}
+
+/// 执行一条 mpv 命令，例如 `["sub-add", 文件, "select"]`、`["cycle", "audio"]`。
+/// Bern 的标准媒体命令里没有倍速、字幕、音轨这些，引擎直接调这里。没有内核时什么也不做。
+pub fn command(words: &[&str]) {
+    #[cfg(windows)]
+    kernel::command(words);
+    #[cfg(not(windows))]
+    let _ = words;
+}
+
+/// 设一个 mpv 属性，值按字符串写，例如 `("speed", "1.5")`。没有内核时什么也不做。
+pub fn set_property(name: &str, value: &str) {
+    #[cfg(windows)]
+    kernel::set_property(name, value);
+    #[cfg(not(windows))]
+    let _ = (name, value);
+}
+
+/// 读出正在播放的视频的章节和编码信息，从交回的通道回话；没有内核时为空。
+pub fn media_info() -> Option<std::sync::mpsc::Receiver<MediaInfo>> {
+    #[cfg(windows)]
+    {
+        kernel::media_info()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
 
 /// 交给内核一集的弹幕，替换之前的；`shift` 是弹弹play 给的时间偏移（秒）。
 /// 排版在内核线程上做。没有装上 libmpv 内核时什么也不做。

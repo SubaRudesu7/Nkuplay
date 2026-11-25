@@ -16,11 +16,6 @@ name = { "en" = "Nkuplay", "zh-Hans" = "Nkuplay" }
 # 显示在安装器和包管理器里。
 # publisher = "Your Name"
 
-# 随应用发布的文件。详情页的彩色小图标（播放、看完的对勾、评分的星）是 SVG：
-# WinUI 上图标不能单独上色，所以画成固定颜色的图片。
-[resources]
-paths = ["nkuplay-ui/icons"]
-
 [languages]
 supported = ["en", "zh-Hans"]
 default = "en"
@@ -37,6 +32,10 @@ type = "nkuplay_core::NkuplayEngine"
 package = "nkuplay-ui"
 sources = ["nkuplay-ui/src/lib.rs"]
 root = "app"
+
+# 应用自己的图标（控制栏用的细线图标），`icon: "resources/icons/play.svg"` 这样引用。
+[resources]
+paths = ["resources/icons"]
 
 # `channels = ["ipc"]` 让生成的命令行和 MCP 服务器能操控正在运行的应用。
 # 去掉它，发布出去的应用就不监听任何通道。

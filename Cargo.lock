@@ -194,9 +194,9 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bern"
-version = "0.2.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10e58f1ae8584e2b9610e29609dea30f4d0077fc9e8d12c98f6f43b4cdd114fa"
+checksum = "7aeb2e423bfc9a1219d1070800aa198038dedc9cb51024cc5518b2d2f8770b6a"
 dependencies = [
  "bern-command",
  "bern-macros",
@@ -209,9 +209,9 @@ dependencies = [
 
 [[package]]
 name = "bern-command"
-version = "0.2.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d62d6ad3f5e0ccc9d5ded36bcdd2b8bc2561a33bfca0ad95ea7bd69719e7dfe4"
+checksum = "418e9015247f2e346669599bc0ac6d150ec2ec8e373214ddcb57bea5445a375f"
 dependencies = [
  "bern-protocol",
  "block2",
@@ -232,9 +232,9 @@ dependencies = [
 
 [[package]]
 name = "bern-ir"
-version = "0.2.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "966c4336f54777e155dd6d9c78d42914f0f0dd5a23bc4ffb6e3f2dae1ff2c650"
+checksum = "83d9801a7ee5e0170f21ff79a313639bccd61f14a6621986838e2f184db8656d"
 dependencies = [
  "bern-protocol",
  "serde",
@@ -243,9 +243,9 @@ dependencies = [
 
 [[package]]
 name = "bern-macros"
-version = "0.2.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d34a27fcb3f83077d1a2aadcd1c05b2e736da48eaec36db4a95e25dc6d2b77a2"
+checksum = "f664ae4ff6e770890549948cc64955e19484e2be759cbcddac64accb421025ba"
 dependencies = [
  "bern-ir",
  "bern-protocol",
@@ -258,18 +258,18 @@ dependencies = [
 
 [[package]]
 name = "bern-media"
-version = "0.2.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4274c82fa7407d3b57a075c04d3c19b74c87b0cf87c54eba9f1f535b7ab71498"
+checksum = "8868daac67d83cdb9ebfa311b1bbee4515ab60e0546eb1f188caf3a20fe8e3fc"
 dependencies = [
  "bern-protocol",
 ]
 
 [[package]]
 name = "bern-protocol"
-version = "0.2.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b42f0404f753680fcda4d098ee6c38c49353e3373ae0c5400886f9999f3c5ffb"
+checksum = "2cfc2c16d4f6b03cd13f331db7a16c47d471aaab544a01f9a0d76a4d14cfca8e"
 dependencies = [
  "serde",
  "serde_json",
@@ -277,18 +277,18 @@ dependencies = [
 
 [[package]]
 name = "bern-runtime"
-version = "0.2.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62b85e6319e286b86253efeb76ef3c771a0631f7e2d3a3ba689a3b901bcacf6e"
+checksum = "a2bcd04821bbc6d78d385a6d96b0ef8cde3fecb33d26225327bfc650e9f48b58"
 dependencies = [
  "bern-protocol",
 ]
 
 [[package]]
 name = "bern-script"
-version = "0.2.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8236979b9a4ae58dd4e5efd0a5e32628e9ce4cc1c9e1978346ce08fca0a24fb9"
+checksum = "703a2f65f0a0a5b85b1be83982658382d536738e570645655aa854bb7e519222"
 dependencies = [
  "serde",
  "serde_json",
@@ -296,9 +296,9 @@ dependencies = [
 
 [[package]]
 name = "bern-syntax"
-version = "0.2.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0255c518d6c676fb33ea6b33513a20f9c7307c963a0b9ba194f876557dc1d9cd"
+checksum = "d382298d9693669eb80cccce82b798acae74d72671522f626f576f9b0ba6d9f0"
 dependencies = [
  "bern-media",
  "bern-protocol",
@@ -940,6 +940,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -958,6 +959,7 @@ dependencies = [
 name = "nkuplay-danmaku"
 version = "0.1.0"
 dependencies = [
+ "regex",
  "ttf-parser",
 ]
 
@@ -2296,6 +2298,21 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zune-core"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
+dependencies = [
+ "zune-core",
+]
 
 [[package]]
 name = "zvariant"

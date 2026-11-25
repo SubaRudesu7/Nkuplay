@@ -34,6 +34,14 @@ pub struct Layout {
     placed: Vec<Placed>,
 }
 
+/// 最小的那个值在第几个。
+fn earliest(values: impl Iterator<Item = f64>) -> usize {
+    values
+        .enumerate()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map_or(0, |(index, _)| index)
+}
+
 impl Layout {
     /// 在 `width` 宽、[`CANVAS_HEIGHT`] 高的画布上排 `track`。
     pub fn new(track: Arc<Track>, width: f64) -> Self {
@@ -61,10 +69,22 @@ impl Layout {
             let lane = match entry.mode {
                 Mode::Scroll => {
                     let speed = (width + entry.width) / duration;
-                    let lane = scrolling.iter().position(|last| match last {
-                        None => true,
-                        Some(last) => fits(last, entry.time, speed, width, spacing, duration),
-                    });
+                    let lane = scrolling
+                        .iter()
+                        .position(|last| match last {
+                            None => true,
+                            Some(last) => fits(last, entry.time, speed, width, spacing, duration),
+                        })
+                        .or_else(|| {
+                            // 允许重叠：叠在最早放进去的那一行上。
+                            config.overlap.then(|| {
+                                earliest(
+                                    scrolling.iter().map(|last| {
+                                        last.map_or(f64::NEG_INFINITY, |last| last.time)
+                                    }),
+                                )
+                            })
+                        });
                     if let Some(lane) = lane {
                         scrolling[lane] = Some(Last {
                             time: entry.time,
@@ -80,7 +100,10 @@ impl Layout {
                     } else {
                         &mut low
                     };
-                    let lane = free.iter().position(|until| *until <= entry.time);
+                    let lane = free
+                        .iter()
+                        .position(|until| *until <= entry.time)
+                        .or_else(|| config.overlap.then(|| earliest(free.iter().copied())));
                     if let Some(lane) = lane {
                         free[lane] = entry.time + fixed;
                     }

@@ -20,7 +20,7 @@ mod measure;
 
 pub use clock::Clock;
 pub use layout::Layout;
-pub use measure::Measure;
+pub use measure::{FONTS, Measure};
 
 use std::collections::HashMap;
 
@@ -72,8 +72,16 @@ pub struct Config {
     pub max_lanes: Option<usize>,
     /// 这么多秒内内容相同的弹幕合成一条，后面写上“×次数”；为空时不合并。
     pub merge_within: Option<f64>,
-    /// 含有其中任何一个词的弹幕不显示。
+    /// 含有其中任何一个词的弹幕不显示；写成 `/…/` 的是正则表达式。
     pub blocked: Vec<String>,
+    /// 显示哪几类：滚动、顶部、底部。
+    pub scroll: bool,
+    pub top: bool,
+    pub bottom: bool,
+    /// 为假时彩色弹幕也画成白色。
+    pub colored: bool,
+    /// 哪一行都放不下时叠在最早空出来的那一行上，而不是丢掉。
+    pub overlap: bool,
 }
 
 impl Default for Config {
@@ -92,6 +100,11 @@ impl Default for Config {
             max_lanes: None,
             merge_within: None,
             blocked: Vec::new(),
+            scroll: true,
+            top: true,
+            bottom: true,
+            colored: true,
+            overlap: false,
         }
     }
 }
@@ -122,16 +135,15 @@ impl Track {
         let mut kept: Vec<(f64, Mode, u32, String, u32)> = Vec::new();
         // 合并时：每种内容最近保留的那一条在 `kept` 里的位置。
         let mut latest: HashMap<(Mode, String), usize> = HashMap::new();
-        let mut sorted: Vec<&Comment> = comments.iter().filter(|c| c.time.is_finite()).collect();
+        let mut sorted: Vec<&Comment> = comments
+            .iter()
+            .filter(|c| c.time.is_finite() && shows(&config, c.mode))
+            .collect();
         sorted.sort_by(|a, b| a.time.total_cmp(&b.time));
+        let blocked = Blocked::new(&config.blocked);
         for comment in sorted {
             let text = clean(&comment.text);
-            if text.is_empty()
-                || config
-                    .blocked
-                    .iter()
-                    .any(|word| !word.is_empty() && text.contains(word.as_str()))
-            {
+            if text.is_empty() || blocked.matches(&text) {
                 continue;
             }
             let time = (comment.time + shift).max(0.0);
@@ -145,7 +157,12 @@ impl Track {
                 }
                 latest.insert(key, kept.len());
             }
-            kept.push((time, comment.mode, comment.color, text, 1));
+            let color = if config.colored {
+                comment.color
+            } else {
+                0xFFFFFF
+            };
+            kept.push((time, comment.mode, color, text, 1));
         }
         let entries = kept
             .into_iter()
@@ -177,6 +194,49 @@ impl Track {
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+}
+
+/// 这一类弹幕要不要显示。
+fn shows(config: &Config, mode: Mode) -> bool {
+    match mode {
+        Mode::Scroll => config.scroll,
+        Mode::Top => config.top,
+        Mode::Bottom => config.bottom,
+    }
+}
+
+/// 屏蔽词：普通的词按包含比较，`/…/` 按正则表达式；写错的正则当普通词。
+struct Blocked {
+    words: Vec<String>,
+    patterns: Vec<regex::Regex>,
+}
+
+impl Blocked {
+    fn new(blocked: &[String]) -> Self {
+        let mut words = Vec::new();
+        let mut patterns = Vec::new();
+        for word in blocked
+            .iter()
+            .map(|word| word.trim())
+            .filter(|word| !word.is_empty())
+        {
+            let pattern = word
+                .strip_prefix('/')
+                .and_then(|rest| rest.strip_suffix('/'))
+                .filter(|inner| !inner.is_empty())
+                .and_then(|inner| regex::Regex::new(inner).ok());
+            match pattern {
+                Some(pattern) => patterns.push(pattern),
+                None => words.push(word.to_string()),
+            }
+        }
+        Self { words, patterns }
+    }
+
+    fn matches(&self, text: &str) -> bool {
+        self.words.iter().any(|word| text.contains(word.as_str()))
+            || self.patterns.iter().any(|pattern| pattern.is_match(text))
     }
 }
 
@@ -295,6 +355,42 @@ mod tests {
         );
         // 黑字用白边。
         assert!(styled("字", 0x000000, &Config::default()).contains("\\3c&HFFFFFF&"));
+    }
+
+    #[test]
+    fn kinds_colours_and_patterns_follow_the_config() {
+        let mut red = comment(1.0, Mode::Scroll, "999");
+        red.color = 0xFF0000;
+        let comments = [
+            red,
+            comment(2.0, Mode::Top, "顶"),
+            comment(3.0, Mode::Bottom, "底"),
+            comment(4.0, Mode::Scroll, "99a"),
+        ];
+        let config = Config {
+            top: false,
+            colored: false,
+            blocked: vec!["/^9+$/".into(), "/[/".into()],
+            ..Config::default()
+        };
+        let track = Track::new(&comments, 0.0, config, &Measure::estimate());
+        let shown: Vec<&str> = track
+            .entries
+            .iter()
+            .map(|entry| entry.styled.rsplit('}').next().unwrap())
+            .collect();
+        // 顶部的不显示，纯数字的被正则挡掉；写错的正则当普通词。
+        assert_eq!(shown, ["底", "99a"]);
+        let plain = Track::new(
+            &comments[..1],
+            0.0,
+            Config {
+                colored: false,
+                ..Config::default()
+            },
+            &Measure::estimate(),
+        );
+        assert!(plain.entries[0].styled.contains("\\c&HFFFFFF&"));
     }
 
     #[test]

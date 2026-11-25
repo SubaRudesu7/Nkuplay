@@ -14,8 +14,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 const FILE: &str = "library.json";
-/// 继续观看最多记这么多个。
-pub const MAX_RECENTS: usize = 12;
+/// 最多记这么多个最近打开过的视频。
+pub const MAX_RECENTS: usize = 48;
+/// 继续播放最多显示这么多部。
+pub const MAX_WATCHING: usize = 12;
 
 /// 算作视频的扩展名（小写）。
 const VIDEO_EXTENSIONS: &[&str] = &[
@@ -38,6 +40,33 @@ pub struct RecentFile {
     /// 上次离开时的画面（缓存文件夹里的图片）。
     #[serde(default)]
     pub shot: Option<PathBuf>,
+    /// 那张画面几乎全黑；还没看过时为空。
+    #[serde(default)]
+    pub shot_black: Option<bool>,
+    /// 弹弹play 的作品编号；没认出时为空。
+    #[serde(default)]
+    pub anime_id: Option<i64>,
+}
+
+impl RecentFile {
+    /// 合并用的键：认出来的视频按作品名（每部番只留最近看的一集），没认出的各算各的。
+    fn show(&self) -> &str {
+        if self.anime_id.is_some() || self.poster.is_some() || !self.episode.is_empty() {
+            &self.title
+        } else {
+            &self.url
+        }
+    }
+}
+
+/// 一部番详情页的背景怎么显示。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackdropChoice {
+    /// 固定一张；否则轮换。
+    pub fixed: bool,
+    /// 固定的那张剧照的文件名；还没选过时为空。
+    #[serde(default)]
+    pub still: Option<String>,
 }
 
 /// 媒体库里的一个文件夹。
@@ -135,6 +164,12 @@ pub struct Library {
     /// 视频地址到看到哪里。
     #[serde(default)]
     pub progress: BTreeMap<String, Watched>,
+    /// 详情页的合并键到它的背景设置。
+    #[serde(default)]
+    pub backdrops: BTreeMap<String, BackdropChoice>,
+    /// 从媒体库隐藏了的番（海报墙的合并键）。
+    #[serde(default)]
+    pub hidden: Vec<String>,
 }
 
 impl Library {
@@ -151,6 +186,8 @@ impl Library {
             episode: String::new(),
             poster: None,
             shot: None,
+            shot_black: None,
+            anime_id: None,
         });
         self.recents.insert(0, recent);
         // 挤出去的那几个的画面也删掉。
@@ -159,6 +196,36 @@ impl Library {
                 let _ = std::fs::remove_file(shot);
             }
         }
+    }
+
+    /// 继续播放：每部番只留最近看的一集，最近的在前，最多 [`MAX_WATCHING`] 部。
+    pub fn watching(&self) -> Vec<&RecentFile> {
+        let mut seen = HashSet::new();
+        self.recents
+            .iter()
+            .filter(|recent| seen.insert(recent.show()))
+            .take(MAX_WATCHING)
+            .collect()
+    }
+
+    /// 视频 `url` 是弹弹play 的哪部作品：开始播放时认出来的，没有时看媒体库里归到哪一部。
+    pub fn anime_of(&self, recent: &RecentFile) -> Option<i64> {
+        recent.anime_id.or_else(|| {
+            self.folders
+                .iter()
+                .flat_map(|folder| &folder.series)
+                .find(|series| series.episodes.iter().any(|e| e.url == recent.url))
+                .and_then(|series| Some(series.identity.as_ref()?.anime_id))
+        })
+    }
+
+    /// 把 `url` 记成看完了（时刻是 `at`）。总时长沿用以前记下的，不知道时随便给一个。
+    pub fn finish(&mut self, url: &str, at: u64) {
+        let duration = self
+            .progress
+            .get(url)
+            .map_or(1, |watched| watched.duration_ms.max(1));
+        self.record(url, duration, duration, at);
     }
 
     /// 去掉继续观看里 `keep` 说不要的视频，连同它们的画面。
@@ -171,10 +238,12 @@ impl Library {
         }
     }
 
-    /// 记下 `url` 上次离开时的画面 `shot`，删掉之前的那张。不在继续观看里的不记，删掉这张图。
-    pub fn shot(&mut self, url: &str, shot: PathBuf) {
+    /// 记下 `url` 上次离开时的画面 `shot`（`black`：几乎全黑），删掉之前的那张。
+    /// 不在继续观看里的不记，删掉这张图。
+    pub fn shot(&mut self, url: &str, shot: PathBuf, black: bool) {
         match self.recents.iter_mut().find(|recent| recent.url == url) {
             Some(recent) => {
+                recent.shot_black = Some(black);
                 if let Some(old) = recent.shot.replace(shot.clone())
                     && old != shot
                 {
@@ -187,9 +256,17 @@ impl Library {
         }
     }
 
-    /// 弹弹play 认出了 `url` 是哪一集：换上作品名、剧集名和海报。
-    pub fn identified(&mut self, url: &str, title: &str, episode: &str, poster: Option<&str>) {
+    /// 弹弹play 认出了 `url` 是作品 `anime_id` 的哪一集：换上作品名、剧集名和海报。
+    pub fn identified(
+        &mut self,
+        url: &str,
+        anime_id: i64,
+        title: &str,
+        episode: &str,
+        poster: Option<&str>,
+    ) {
         if let Some(recent) = self.recents.iter_mut().find(|recent| recent.url == url) {
+            recent.anime_id = Some(anime_id);
             recent.title = title.to_string();
             recent.episode = episode.to_string();
             recent.poster = poster.map(str::to_string);
@@ -378,6 +455,11 @@ impl Store {
         Self { folder }
     }
 
+    /// 存放数据的文件夹；没有时不存。
+    pub fn folder(&self) -> Option<&PathBuf> {
+        self.folder.as_ref()
+    }
+
     /// 应用的数据文件夹。
     pub fn built_in() -> Self {
         Self::new(bern::storage::data_dir())
@@ -417,7 +499,7 @@ mod tests {
         let urls: Vec<_> = library.recents.iter().map(|r| r.url.as_str()).collect();
         assert_eq!(urls, ["file:///a.mkv", "file:///b.mkv"]);
         assert_eq!(library.recents[0].title, "a");
-        for index in 0..20 {
+        for index in 0..MAX_RECENTS + 8 {
             library.opened(&format!("file:///{index}.mp4"), "x.mp4");
         }
         assert_eq!(library.recents.len(), MAX_RECENTS);
@@ -429,6 +511,7 @@ mod tests {
         library.opened("file:///a.mkv", "[Group] Show - 01.mkv");
         library.identified(
             "file:///a.mkv",
+            12345,
             "某作品",
             "第1话",
             Some("https://img/p.jpg"),
@@ -456,11 +539,12 @@ mod tests {
         let mut library = Library::default();
         library.opened("file:///a.mkv", "a.mkv");
         let (first, second, stray) = (file("1.jpg"), file("2.jpg"), file("3.jpg"));
-        library.shot("file:///a.mkv", first.clone());
-        library.shot("file:///a.mkv", second.clone());
+        library.shot("file:///a.mkv", first.clone(), true);
+        library.shot("file:///a.mkv", second.clone(), false);
         assert!(!first.exists());
         assert_eq!(library.recents[0].shot.as_ref(), Some(&second));
-        library.shot("file:///gone.mkv", stray.clone());
+        assert_eq!(library.recents[0].shot_black, Some(false));
+        library.shot("file:///gone.mkv", stray.clone(), false);
         assert!(!stray.exists());
         // 挤出继续观看的，画面一起删。
         for index in 0..MAX_RECENTS {
@@ -468,6 +552,60 @@ mod tests {
         }
         assert!(!second.exists());
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn only_the_latest_episode_of_each_show_is_kept_watching() {
+        let mut library = Library::default();
+        for (url, title, episode) in [
+            ("file:///4.mkv", "尼古喵喵", "第4话"),
+            ("file:///7.mkv", "尼古喵喵", "第7话"),
+            ("file:///x.mkv", "别的", "第1话"),
+        ] {
+            library.opened(url, url);
+            library.identified(url, 1, title, episode, None);
+        }
+        // 没认出的视频各算各的。
+        library.opened("file:///a.mkv", "a.mkv");
+        library.opened("file:///b/a.mkv", "a.mkv");
+        let urls: Vec<&str> = library.watching().iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            [
+                "file:///b/a.mkv",
+                "file:///a.mkv",
+                "file:///x.mkv",
+                "file:///7.mkv"
+            ]
+        );
+        // 再看第 4 话，它就换到前面。
+        library.opened("file:///4.mkv", "4.mkv");
+        assert_eq!(library.watching()[0].url, "file:///4.mkv");
+        // 以前的记录没有作品编号：看媒体库里归到哪一部。
+        library.recents[0].anime_id = None;
+        assert_eq!(library.anime_of(&library.recents[0]), None);
+        library.add_folder("file:///D:/A", "A");
+        let mut shelf = group(&[file("尼古喵喵 - 04.mkv", "x")], &HashMap::new());
+        shelf[0].episodes[0].url = "file:///4.mkv".into();
+        shelf[0].identity = Some(Identity {
+            anime_id: 7,
+            title: "尼古喵喵".into(),
+            poster: None,
+        });
+        library.folders[0].series = shelf;
+        assert_eq!(library.anime_of(&library.recents[0]), Some(7));
+        assert_eq!(library.watching().len(), 4);
+    }
+
+    #[test]
+    fn a_video_can_be_marked_as_finished() {
+        let mut library = Library::default();
+        library.finish("file:///a.mkv", 1);
+        assert!(library.progress["file:///a.mkv"].finished());
+        library.record("file:///b.mkv", 100, 1_000, 1);
+        library.finish("file:///b.mkv", 2);
+        assert_eq!(library.progress["file:///b.mkv"].duration_ms, 1_000);
+        assert!(library.progress["file:///b.mkv"].finished());
     }
 
     #[test]

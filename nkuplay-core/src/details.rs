@@ -122,9 +122,21 @@ impl Source {
     }
 }
 
+/// 剧集的分组。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    /// 正片，以及对不上的本地文件。
+    Main,
+    /// 特别篇（`S1` 等）。
+    Special,
+    /// OP / ED（`C1`）。
+    Extra,
+}
+
 /// 详情页剧集列表里的一行。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
+    pub group: Group,
     /// 特别篇和 OP/ED 的短编号（`S1`、`C1`）；正片和本地文件为空。
     pub code: String,
     /// 第几集；特别篇和认不出集数的本地文件为空。
@@ -187,6 +199,11 @@ pub fn rows(
         }
         let url = found.map(|at| local[at].url.clone());
         rows.push(Row {
+            group: match number {
+                Some(_) => Group::Main,
+                None if episode.episode_number.starts_with(['C', 'c']) => Group::Extra,
+                None => Group::Special,
+            },
             code: if number.is_some() {
                 String::new()
             } else {
@@ -205,6 +222,7 @@ pub fn rows(
         .map(|(file, _)| file)
     {
         rows.push(Row {
+            group: Group::Main,
             code: String::new(),
             number: file.episode,
             title: stem(&file.name).to_string(),
@@ -218,10 +236,10 @@ pub fn rows(
 /// 剧集列表上方的统计，以及“继续”指向哪一行。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Summary {
-    /// 弹弹play 的正片集数。
+    /// 正片（含对不上的本地文件）、特别篇、OP / ED 各有几行。
     pub main: usize,
-    /// 弹弹play 的特别篇和 OP/ED 个数。
     pub special: usize,
+    pub extra: usize,
     /// 本地有的集数。
     pub local: usize,
     /// 最近看过的那一行。
@@ -231,10 +249,9 @@ pub struct Summary {
     pub next: Option<usize>,
 }
 
-/// `rows` 的统计；`from_details` 是其中来自弹弹play 的行数（排在前面）。
-pub fn summarize(rows: &[Row], from_details: usize) -> Summary {
-    let listed = &rows[..from_details.min(rows.len())];
-    let main = listed.iter().filter(|row| row.number.is_some()).count();
+/// `rows` 的统计。
+pub fn summarize(rows: &[Row]) -> Summary {
+    let count = |group: Group| rows.iter().filter(|row| row.group == group).count();
     let local = rows.iter().filter(|row| row.url.is_some()).count();
     let last = rows
         .iter()
@@ -251,24 +268,51 @@ pub fn summarize(rows: &[Row], from_details: usize) -> Summary {
         None => first_local(),
     };
     Summary {
-        main,
-        special: listed.len() - main,
+        main: count(Group::Main),
+        special: count(Group::Special),
+        extra: count(Group::Extra),
         local,
         last,
         next,
     }
 }
 
-/// 作品的其他标题，去掉和主标题相同的、重复的，用 ` · ` 连起来。
-pub fn other_titles(details: &BangumiDetails) -> String {
-    let mut seen = HashSet::from([details.anime_title.trim()]);
+/// 详情页选中的那一行：正在播放的；没有时是最近看过的；都没有时是第一集。
+pub fn selected(rows: &[Row], summary: &Summary, playing: Option<&str>) -> Option<usize> {
+    let playing =
+        playing.and_then(|url| rows.iter().position(|row| row.url.as_deref() == Some(url)));
+    playing
+        .or(summary.last)
+        .or_else(|| rows.iter().position(|row| row.group == Group::Main))
+}
+
+/// 作品的日文标题，和主标题一样或没有时为空。
+pub fn native_title(details: &BangumiDetails) -> String {
     details
         .titles
         .iter()
-        .map(|title| title.title.trim())
-        .filter(|title| !title.is_empty() && seen.insert(title))
-        .collect::<Vec<_>>()
-        .join(" · ")
+        .find(|title| title.language.contains("日语") && !title.language.contains("罗马"))
+        .map(|title| title.title.trim().to_string())
+        .filter(|title| title != details.anime_title.trim())
+        .unwrap_or_default()
+}
+
+/// 弹弹play 列出的正片集数。
+pub fn episode_count(details: &BangumiDetails) -> usize {
+    details
+        .episodes
+        .iter()
+        .filter(|episode| episode.episode_number.parse::<u32>().is_ok())
+        .count()
+}
+
+/// 这部番一集多少分钟：本地文件里记下过的最长的时长；都没播放过时为空。
+pub fn minutes(rows: &[Row]) -> Option<i64> {
+    rows.iter()
+        .filter_map(|row| row.watched)
+        .map(|watched| (watched.duration_ms + 30_000) / 60_000)
+        .filter(|minutes| *minutes > 0)
+        .max()
 }
 
 /// 只留字母和数字、转成小写，用来认出同一个名字的不同写法（`KINEMA_CITRUS`、`KINEMA CITRUS`）。
@@ -431,15 +475,13 @@ pub(crate) mod tests {
             image_url: Some("https://img.example/18643.jpg".into()),
             type_description: "TV动画".into(),
             titles: [
-                "再见，拉拉",
-                "Sayonara Lara",
-                "さよならララ",
-                "Sayonara Lara",
-                "再見菈菈",
+                ("主标题", "再见，拉拉"),
+                ("主标题，日语罗马字", "Sayonara Lara"),
+                ("官方标题，日语", "さよならララ"),
             ]
             .into_iter()
-            .map(|title| BangumiTitle {
-                language: String::new(),
+            .map(|(language, title)| BangumiTitle {
+                language: language.into(),
                 title: title.into(),
             })
             .collect(),
@@ -558,14 +600,15 @@ pub(crate) mod tests {
         let rows = rows(None, &local, &BTreeMap::new());
         assert_eq!(rows.len(), 2);
         assert_eq!((rows[1].number, rows[1].title.as_str()), (None, "extra"));
-        let summary = summarize(&rows, 0);
-        assert_eq!((summary.main, summary.special, summary.local), (0, 0, 2));
+        let summary = summarize(&rows);
+        assert_eq!((summary.main, summary.special, summary.local), (2, 0, 2));
         assert_eq!((summary.last, summary.next), (None, Some(0)));
     }
 
     fn numbered(count: u32) -> Vec<Row> {
         (1..=count)
             .map(|number| Row {
+                group: Group::Main,
                 code: String::new(),
                 number: Some(number),
                 title: String::new(),
@@ -578,22 +621,28 @@ pub(crate) mod tests {
     #[test]
     fn continue_points_at_the_last_unfinished_episode_or_the_next_local_one() {
         let mut rows = numbered(5);
-        let summary = summarize(&rows, 5);
+        let summary = summarize(&rows);
         assert_eq!((summary.main, summary.local, summary.next), (5, 4, Some(0)));
 
         // 第 2 集看了一半，之前看完过第 1 集：继续第 2 集。
         rows[0].watched = Some(watched(1_000, 1));
         rows[1].watched = Some(watched(300, 2));
-        let summary = summarize(&rows, 5);
+        let summary = summarize(&rows);
         assert_eq!((summary.last, summary.next), (Some(1), Some(1)));
 
         // 第 2 集看完了：第 3 集本地没有，跳到第 4 集。
         rows[1].watched = Some(watched(950, 3));
-        assert_eq!(summarize(&rows, 5).next, Some(3));
+        assert_eq!(summarize(&rows).next, Some(3));
 
+        // 选中的是最近看过的；正在播放别的一集时是正在播放的。
+        assert_eq!(selected(&rows, &summarize(&rows), None), Some(1));
+        assert_eq!(
+            selected(&rows, &summarize(&rows), Some("file:///5.mkv")),
+            Some(4)
+        );
         // 最后一集也看完了：后面没有了，就还是它。
         rows[4].watched = Some(watched(1_000, 4));
-        let summary = summarize(&rows, 5);
+        let summary = summarize(&rows);
         assert_eq!((summary.last, summary.next), (Some(4), Some(4)));
     }
 
@@ -605,18 +654,19 @@ pub(crate) mod tests {
             &[file("Lara - 01.mkv", Some(1))],
             &BTreeMap::new(),
         );
-        let summary = summarize(&rows, details.episodes.len());
-        assert_eq!((summary.main, summary.special, summary.local), (3, 2, 1));
+        let summary = summarize(&rows);
+        assert_eq!(
+            (summary.main, summary.special, summary.extra, summary.local),
+            (3, 1, 1, 1)
+        );
         assert_eq!(summary.next, Some(0));
     }
 
     #[test]
     fn the_banner_texts_are_tidied() {
         let details = lara();
-        assert_eq!(
-            other_titles(&details),
-            "Sayonara Lara · さよならララ · 再見菈菈"
-        );
+        assert_eq!(native_title(&details), "さよならララ");
+        assert_eq!(episode_count(&details), 3);
         assert_eq!(
             tags(&details, 6),
             ["恋爱", "奇幻", "童话", "小出卓史", "青春", "百合"]

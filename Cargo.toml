@@ -8,7 +8,7 @@ edition = "2024"
 rust-version = "1.99"
 
 [workspace.dependencies]
-bern = { version = "0.2.1" }
+bern = "0.3.3"
 nkuplay-protocol = { path = "nkuplay-protocol" }
 nkuplay-mpv = { path = "nkuplay-mpv" }
 nkuplay-dandanplay = { path = "nkuplay-dandanplay" }
